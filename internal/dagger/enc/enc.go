@@ -1,15 +1,6 @@
 package enc
 
 const (
-	PbHdrF1VI = byte(0x08)
-	PbHdrF2VI = byte(0x10)
-	PbHdrF3VI = byte(0x18)
-	PbHdrF4VI = byte(0x20)
-	PbHdrF1LD = byte(0x0A)
-	PbHdrF2LD = byte(0x12)
-	PbHdrF3LD = byte(0x1A)
-	PbHdrF4LD = byte(0x22)
-
 	VarintMaxWireBytes int = 9
 )
 

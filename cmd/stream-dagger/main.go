@@ -4,10 +4,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 
-	// import early for version check
-	_ "github.com/ipfs-shipyard/DAGger/constants"
-
+	"github.com/ipfs-shipyard/DAGger/constants"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 )
@@ -40,8 +39,13 @@ func main() {
 	}
 
 	processErr := func() error {
+
 		if util.ProfileStartStop != nil {
 			defer util.ProfileStartStop()()
+		} else if constants.PerformSanityChecks {
+			// needed to trigger the zcpstring overallocation guards
+			defer runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
+			defer runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
 		}
 
 		return dagger.ProcessReader(

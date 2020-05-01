@@ -26,7 +26,7 @@ func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver cha
 
 	var initErr error
 	cfg.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
-		// min-emit must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
+		// MinRegion must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
 		// SANCHECK: this may not necessarily be true...
 		MinRegion:  2 * cfg.GlobalMaxChunkSize,
 		MinRead:    cfg.RingBufferMinRead,

@@ -40,10 +40,10 @@ func TestString(t *testing.T) {
 		corpus.AddByte(byte(i))
 	}
 
-	if expectedFinalCap != corpus.SegmentLen() {
+	if expectedFinalCap != len(corpus.slices) {
 		t.Errorf(
 			"Final test corpus segment count %d does not match expected value of %d",
-			corpus.SegmentLen(),
+			len(corpus.slices),
 			expectedFinalCap,
 		)
 	}

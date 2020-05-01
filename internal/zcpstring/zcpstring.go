@@ -17,93 +17,53 @@ func init() {
 }
 
 type ZcpString struct {
-	trackAlloc bool
-	size       int
-	slices     [][]byte
+	growGuard bool
+	size      int
+	slices    [][]byte
 }
 
 func NewFromSlice(s []byte) *ZcpString {
 	return &ZcpString{
-		slices: [][]byte{s},
-		size:   len(s),
+		slices:    [][]byte{s},
+		size:      len(s),
+		growGuard: constants.PerformSanityChecks,
 	}
 }
 
 func NewWithSegmentCap(capOfSegmentContainer int) *ZcpString {
-	z := &ZcpString{
-		slices:     make([][]byte, 0, capOfSegmentContainer),
-		trackAlloc: constants.PerformSanityChecks,
+	zcp := &ZcpString{
+		slices:    make([][]byte, 0, capOfSegmentContainer),
+		growGuard: constants.PerformSanityChecks,
 	}
-
 	if constants.PerformSanityChecks {
-		runtime.SetFinalizer(z, func(z *ZcpString) {
-			if cap(z.slices) != len(z.slices) {
-				lim := z.size
-				suffix := ""
-				if lim > 20 {
-					lim = 20
-					suffix = "..."
-				}
-				// Fatal instead of Panic, as the stack won't help us much at this point
-				log.Fatalf(
-					"\n!!!!!!!!!!!!!!!!!!!!!\nOverallocated zstring %#v%s: %d segments used of %d capacity\n!!!!!!!!!!!!!!!!!!!!!\n\n",
-					(z.AppendTo(make([]byte, 0)))[:lim],
-					suffix,
-					len(z.slices),
-					cap(z.slices),
-				)
-			}
-		})
+		zcp._attachOverallocationGuard()
 	}
-
-	return z
+	return zcp
 }
-func (z *ZcpString) SegmentLen() int { return len(z.slices) }
-func (z *ZcpString) Size() int       { return z.size }
+func (z *ZcpString) Size() int { return z.size }
 
 func (z *ZcpString) AddSlice(in []byte) {
-	if constants.PerformSanityChecks && z.trackAlloc &&
-		len(z.slices)+1 > cap(z.slices) {
-		log.Panicf(
-			"Unexpected segmentlist grow: have %d, need %d",
-			cap(z.slices),
-			len(z.slices)+1,
-		)
+	if constants.PerformSanityChecks && z.growGuard {
+		z._assertSpaceFor(1)
 	}
-
 	z.size += len(in)
 	z.slices = append(z.slices, in)
 }
 func (z *ZcpString) AddByte(in byte) {
-	if constants.PerformSanityChecks && z.trackAlloc &&
-		len(z.slices)+1 > cap(z.slices) {
-		log.Panicf(
-			"Unexpected segmentlist grow: have %d, need %d",
-			cap(z.slices),
-			len(z.slices)+1,
-		)
+	if constants.PerformSanityChecks && z.growGuard {
+		z._assertSpaceFor(1)
 	}
-
 	z.size++
 	z.slices = append(z.slices, byteDict[in:int(in)+1])
 }
 func (z *ZcpString) AddZcp(in *ZcpString) {
-	if constants.PerformSanityChecks && z.trackAlloc &&
-		len(z.slices)+len(in.slices) > cap(z.slices) {
-		log.Panicf(
-			"Unexpected segmentlist grow: have %d, need %d",
-			cap(z.slices),
-			len(z.slices)+len(in.slices),
-		)
+	if constants.PerformSanityChecks && z.growGuard {
+		z._assertSpaceFor(len(in.slices))
 	}
-
 	z.size += in.size
 	z.slices = append(z.slices, in.slices...)
 }
 
-func (z *ZcpString) SliceList() [][]byte {
-	return z.slices
-}
 func (z *ZcpString) AppendTo(target []byte) []byte {
 	for _, s := range z.slices {
 		target = append(target, s...)
@@ -120,4 +80,34 @@ func (z *ZcpString) WriteTo(w io.Writer) (written int64, err error) {
 		}
 	}
 	return
+}
+
+func (z *ZcpString) _assertSpaceFor(n int) {
+	if len(z.slices)+n > cap(z.slices) {
+		log.Panicf(
+			"Unexpected segmentlist grow: have %d, need %d",
+			cap(z.slices),
+			len(z.slices)+n,
+		)
+	}
+}
+func (z *ZcpString) _attachOverallocationGuard() {
+	runtime.SetFinalizer(z, func(z *ZcpString) {
+		if cap(z.slices) != len(z.slices) {
+			lim := z.size
+			suffix := ""
+			if lim > 20 {
+				lim = 20
+				suffix = "..."
+			}
+			// Fatal instead of Panic, as the stack won't help us much at this point
+			log.Fatalf(
+				"\n!!!!!!!!!!!!!!!!!!!!!\nOverallocated zcpstring %#v%s: at GC destroyed object has only %d segments used of %d capacity\n!!!!!!!!!!!!!!!!!!!!!\n\n",
+				(z.AppendTo(make([]byte, 0)))[:lim],
+				suffix,
+				len(z.slices),
+				cap(z.slices),
+			)
+		}
+	})
 }

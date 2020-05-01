@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/enc/dagpb"
 	linkerbase "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/util/dagpb"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"

@@ -11,6 +11,15 @@ import (
 const (
 	UnixFsTypeRaw  = byte(0)
 	UnixFsTypeFile = byte(2)
+
+	pbHdrF1VI = byte(0x08)
+	pbHdrF2VI = byte(0x10)
+	pbHdrF3VI = byte(0x18)
+	pbHdrF4VI = byte(0x20)
+	pbHdrF1LD = byte(0x0A)
+	pbHdrF2LD = byte(0x12)
+	pbHdrF3LD = byte(0x1A)
+	pbHdrF4LD = byte(0x22)
 )
 
 func UnixFSv1Leaf(ds block.DataSource, bm block.Maker, leafUnixFsType byte) *block.Header {
@@ -34,14 +43,14 @@ func UnixFSv1Leaf(ds block.DataSource, bm block.Maker, leafUnixFsType byte) *blo
 	viLen := enc.VarintSlice(uint64(ds.Size))
 
 	blockData := zcpstring.NewWithSegmentCap(9)
-	blockData.AddByte(enc.PbHdrF1LD)
+	blockData.AddByte(pbHdrF1LD)
 	blockData.AddSlice(enc.VarintSlice(uint64(3 + 2*len(viLen) + ds.Size + 1)))
-	blockData.AddByte(enc.PbHdrF1VI)
+	blockData.AddByte(pbHdrF1VI)
 	blockData.AddByte(leafUnixFsType)
-	blockData.AddByte(enc.PbHdrF2LD)
+	blockData.AddByte(pbHdrF2LD)
 	blockData.AddSlice(viLen)
 	blockData.AddZcp(ds.Content)
-	blockData.AddByte(enc.PbHdrF3VI)
+	blockData.AddByte(pbHdrF3VI)
 	blockData.AddSlice(viLen)
 
 	return bm(
@@ -61,10 +70,18 @@ func UnixFSv1LinkNode(
 ) *block.Header {
 
 	var totalPayload, subDagSize uint64
-	seekOffsets := zcpstring.NewWithSegmentCap(2 * len(blocks))
-	linkBlock := zcpstring.NewWithSegmentCap(
-		(9 * len(blocks)) + (6 + 2*len(blocks)),
-	)
+	var linkBlock, seekOffsets *zcpstring.ZcpString
+	if omitTsizeAndOffsets {
+		seekOffsets = &zcpstring.ZcpString{}
+		linkBlock = zcpstring.NewWithSegmentCap(
+			(5 * len(blocks)) + 6,
+		)
+	} else {
+		seekOffsets = zcpstring.NewWithSegmentCap(2 * len(blocks))
+		linkBlock = zcpstring.NewWithSegmentCap(
+			(9 * len(blocks)) + 6 + 2*len(blocks),
+		)
+	}
 
 	for _, blk := range blocks {
 
@@ -78,22 +95,22 @@ func UnixFSv1LinkNode(
 		cidLenVI := enc.VarintSlice(uint64(len(cid)))
 		dagSizeVI := enc.VarintSlice(blk.SizeCumulativeDag())
 
-		linkBlock.AddByte(enc.PbHdrF2LD)
+		linkBlock.AddByte(pbHdrF2LD)
 		linkBlock.AddSlice(enc.VarintSlice(uint64(1 + len(cidLenVI) + len(cid) + 3 + len(dagSizeVI))))
 
-		linkBlock.AddByte(enc.PbHdrF1LD)
+		linkBlock.AddByte(pbHdrF1LD)
 		linkBlock.AddSlice(cidLenVI)
 		linkBlock.AddSlice(cid)
 
 		if !omitTsizeAndOffsets {
 			// yes, a zero-length piece needed here for convergence :(((
-			linkBlock.AddByte(enc.PbHdrF2LD)
+			linkBlock.AddByte(pbHdrF2LD)
 			linkBlock.AddByte(0)
 
-			linkBlock.AddByte(enc.PbHdrF3VI)
+			linkBlock.AddByte(pbHdrF3VI)
 			linkBlock.AddSlice(dagSizeVI)
 
-			seekOffsets.AddByte(enc.PbHdrF4VI)
+			seekOffsets.AddByte(pbHdrF4VI)
 			seekOffsets.AddSlice(enc.VarintSlice(blk.SizeCumulativePayload()))
 		}
 
@@ -113,12 +130,12 @@ func UnixFSv1LinkNode(
 
 	payloadSizeVI := enc.VarintSlice(totalPayload)
 
-	linkBlock.AddByte(enc.PbHdrF1LD)
+	linkBlock.AddByte(pbHdrF1LD)
 	linkBlock.AddSlice(enc.VarintSlice(uint64(3 + len(payloadSizeVI) + seekOffsets.Size())))
 
-	linkBlock.AddByte(enc.PbHdrF1VI)
+	linkBlock.AddByte(pbHdrF1VI)
 	linkBlock.AddByte(2)
-	linkBlock.AddByte(enc.PbHdrF3VI)
+	linkBlock.AddByte(pbHdrF3VI)
 	linkBlock.AddSlice(payloadSizeVI)
 	linkBlock.AddZcp(seekOffsets)
 
