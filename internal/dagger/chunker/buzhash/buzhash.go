@@ -29,9 +29,7 @@ type buzhashChunker struct {
 
 func (c *buzhashChunker) MinChunkSize() int { return c.MinSize }
 
-func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, slices chan<- chunker.SplitResult) {
-	defer close(slices)
-
+func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
 	var state uint32
 	var curIdx, lastIdx, nextRoundMax int
 	postBufIdx := len(buf)
@@ -53,7 +51,7 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, slices c
 		// in case we will *NOT* be able to run another round at all
 		if curIdx+c.MinSize >= postBufIdx {
 			if !moreDataNextInvocation && postBufIdx != curIdx {
-				slices <- chunker.SplitResult{Size: postBufIdx - curIdx}
+				cb(chunker.Chunk{Size: postBufIdx - curIdx})
 			}
 			return
 		}
@@ -77,7 +75,7 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, slices c
 		}
 
 		// awlays a find at this point, we bailed on short buffers earlier
-		slices <- chunker.SplitResult{Size: curIdx - lastIdx}
+		cb(chunker.Chunk{Size: curIdx - lastIdx})
 	}
 }
 

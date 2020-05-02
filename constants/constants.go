@@ -10,7 +10,7 @@ const (
 	// the 32 is explicit - many assumptions we won't cross over
 	HardMaxBlockSize int32 = 2 * 1024 * 1024
 
-	// SANCHECK - will need to possibly be updated for CBOR ( whichever ends up providing less available space )
+	// SANCHECK - will almost certainly need to be updated for CBOR ( whichever ends up providing less available space )
 	// Based on DAG-PB/UnixFs-v1, with max len of "2MiB shave a few bytes" encoded as 3 varint bytes
 	// (2b(type2/file)+4b(data-field:3-byte-len-delimited)+4b(size-field:3-byte-varint))+(4b(DAG-type-1:3-byte-len-delimited))
 	HardMaxPayloadSize int32 = HardMaxBlockSize - (2 + 4 + 4 + 4)

@@ -5,11 +5,11 @@ type Chunker interface {
 	Split(
 		rawData []byte,
 		moreDataNextInvocation bool,
-		resultSlices chan<- SplitResult,
+		resultCallback func(Chunk),
 	)
 }
 
-type SplitResult struct {
+type Chunk struct {
 	Size int
 	Meta map[interface{}]interface{}
 }

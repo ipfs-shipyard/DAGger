@@ -28,9 +28,7 @@ type rabinChunker struct {
 
 func (c *rabinChunker) MinChunkSize() int { return c.MinSize }
 
-func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, slices chan<- chunker.SplitResult) {
-	defer close(slices)
-
+func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
 	var state uint64
 	var curIdx, lastIdx, nextRoundMax int
 	postBufIdx := len(buf)
@@ -57,7 +55,7 @@ func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, slices cha
 		// in case we will *NOT* be able to run another round at all
 		if curIdx+c.MinSize >= postBufIdx {
 			if !moreDataNextInvocation && postBufIdx != curIdx {
-				slices <- chunker.SplitResult{Size: postBufIdx - curIdx}
+				cb(chunker.Chunk{Size: postBufIdx - curIdx})
 			}
 			return
 		}
@@ -86,7 +84,7 @@ func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, slices cha
 		}
 
 		// awlays a find at this point, we bailed on short buffers earlier
-		slices <- chunker.SplitResult{Size: curIdx - lastIdx}
+		cb(chunker.Chunk{Size: curIdx - lastIdx})
 	}
 }
 

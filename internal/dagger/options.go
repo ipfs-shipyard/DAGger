@@ -6,12 +6,11 @@ import (
 	"log"
 	"math"
 	"os"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/ipfs/go-qringbuf"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
 
@@ -53,18 +52,8 @@ const (
 // where the CLI initial error messages go
 var argParseErrOut = os.Stderr
 
-type blockPostProcessResult struct {
-}
-
-// both options and "context" in one go
 type config struct {
-	// unexported state members are not visible to the getopt auto-generator
-	chainedChunkers     []chunker.Chunker
-	chainedLinkers      []linker.Linker
-	qrb                 *qringbuf.QuantizedRingBuffer
-	uniqueBlockCallback func(hdr *block.Header) blockPostProcessResult
-	asyncWG             sync.WaitGroup
-	stats               runStats
+	optSet *getopt.Set
 
 	// where to output
 	emitters map[string]io.WriteCloser
@@ -81,7 +70,6 @@ type config struct {
 	HelpAll          bool `getopt:"--help-all            Display help including options of individual plugins"`
 	MultipartStream  bool `getopt:"--multipart           Expect multiple SInt64BE-size-prefixed streams on stdIN"`
 	ProcessNulInputs bool `getopt:"--process-nul-inputs  Instead of skipping zero-length streams, emit a proper zero-length CID based on other settings"`
-	AsyncHashing     bool `getopt:"--async-hashing       Spawn a short-lived goroutine for each hash operation. Disable for predictable benchmarking. Default:"`
 
 	emittersStdErr []string // Emitter spec: option/helptext in setupArgvParser
 	emittersStdOut []string // Emitter spec: option/helptext in setupArgvParser
@@ -89,9 +77,12 @@ type config struct {
 	// 34 bytes is the largest identity CID that fits in 63 chars (dns limit) of b-prefixed base32 encoding
 	InlineMaxSize      int `getopt:"--inline-max-size          Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
 	GlobalMaxChunkSize int `getopt:"--max-chunk-size           Maximum data chunk size, same as maximum amount of payload in a leaf datablock. Default:"`
+	AsyncHashers       int `getopt:"--async-hashers            Number of concurrent short-lived goroutines performing hashing. Set to 0 (disable) for predictable benchmarking. Default:"`
 	RingBufferSize     int `getopt:"--ring-buffer-size         The size of the quantized ring buffer used for ingestion. Default:"`
 	RingBufferSectSize int `getopt:"--ring-buffer-sync-size    (EXPERT SETTING) The size of each buffer synchronization sector. Default:"` // option vaguely named 'sync' to not confuse users
 	RingBufferMinRead  int `getopt:"--ring-buffer-min-sysread  (EXPERT SETTING) Perform next read(2) only when the specified amount of free space is available in the buffer. Default:"`
+
+	StatsEnabled int `getopt:"--stats-enabled  An integer representing enabled stat aggregations: bit0:Blocks, bit1:RingbufferTiming. Default:"`
 
 	HashBits int    `getopt:"--hash-bits Amount of bits taken from *start* of the hash output"`
 	hashAlg  string // hash algorithm to use: option/helptext in setupArgvParser
@@ -102,55 +93,72 @@ type config struct {
 	IpfsCompatCmd string `getopt:"--ipfs-add-compatible-command A complete go-ipfs/js-ipfs add command serving as a basis config (any conflicting option will take precedence)"`
 }
 
-func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
+const (
+	statsBlocks = 1 << iota
+	statsRingbuf
+)
+
+func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 	// Some minimal non-controversial defaults, all overridable
-	// *NEVER* have defaults that influence the resulting CIDs
-	cfg := &config{
-		GlobalMaxChunkSize: 1024 * 1024,
-		HashBits:           256,
-		AsyncHashing:       true,
+	// Try really hard to *NOT* have defaults that influence resulting CIDs
+	dgr := &Dagger{
+		cfg: config{
+			GlobalMaxChunkSize: 1024 * 1024,
+			HashBits:           256,
+			AsyncHashers:       runtime.NumCPU() + runtime.NumCPU()/2,
 
-		// RingBufferSize: int(2*constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
-		RingBufferSize: 32 * 1024 * 1024,
+			StatsEnabled: statsBlocks,
 
-		//SANCHECK: these numbers have not been validated
-		RingBufferMinRead:  128 * 1024,
-		RingBufferSectSize: 512 * 1024,
+			// RingBufferSize: int(2*constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
+			RingBufferSize: 24 * 1024 * 1024,
 
-		emittersStdOut:   []string{emRootsJsonl},
-		emittersStdErr:   []string{emStatsText},
-		requestedLinkers: "none",
+			//SANCHECK: these numbers have not been validated
+			RingBufferMinRead:  128 * 1024,
+			RingBufferSectSize: 128 * 1024,
 
-		// not defaults but rather the list of known/configured emitters
-		emitters: map[string]io.WriteCloser{
-			emNone:        nil,
-			emStatsText:   nil,
-			emStatsJsonl:  nil,
-			emRootsJsonl:  nil,
-			emChunksJsonl: nil,
-			// emCarV0Fifos:          nil,
-			// emCarV0RootlessStream: nil,
+			emittersStdOut:   []string{emRootsJsonl},
+			emittersStdErr:   []string{emStatsText},
+			requestedLinkers: "none",
+
+			// not defaults but rather the list of known/configured emitters
+			emitters: map[string]io.WriteCloser{
+				emNone:        nil,
+				emStatsText:   nil,
+				emStatsJsonl:  nil,
+				emRootsJsonl:  nil,
+				emChunksJsonl: nil,
+				// emCarV0Fifos:          nil,
+				// emCarV0RootlessStream: nil,
+			},
 		},
 	}
 
-	// constant used in JSON output
-	cfg.stats.summary.Event = "summary"
+	// init some constants
+	{
+		s := &dgr.statSummary
+		s.EventType = "summary"
 
-	cfg.stats.summary.SysStats.ArgvInitial = make([]string, len(argv)-1)
-	copy(cfg.stats.summary.SysStats.ArgvInitial, argv[1:])
+		s.SysStats.ArgvInitial = make([]string, len(argv)-1)
+		copy(s.SysStats.ArgvInitial, argv[1:])
 
-	optSet := makeArgvParser(cfg)
-	optSet.Parse(argv)
+		s.SysStats.NumCPU = runtime.NumCPU()
+		s.SysStats.PageSize = os.Getpagesize()
+		s.SysStats.GoVersion = runtime.Version()
+	}
+
+	cfg := &dgr.cfg
+	cfg.initArgvParser()
+	cfg.optSet.Parse(argv)
 	if cfg.Help || cfg.HelpAll {
-		printUsage(optSet, cfg)
+		cfg.printUsage()
 		os.Exit(0)
 	}
 
 	// accumulator for multiple erros, to present to the user all at once
 	var argErrs []string
 
-	unexpectedArgs := optSet.Args()
+	unexpectedArgs := cfg.optSet.Args()
 	if len(unexpectedArgs) != 0 {
 		argErrs = append(argErrs, fmt.Sprintf(
 			"Program does not take free-form arguments: '%s ...'",
@@ -159,8 +167,8 @@ func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
 	}
 
 	// pre-populate from a compat `ipfs add` command if one was supplied
-	if optSet.IsSet("ipfs-add-compatible-command") {
-		if errStrings := presetFromIPFS(cfg, optSet); len(errStrings) > 0 {
+	if cfg.optSet.IsSet("ipfs-add-compatible-command") {
+		if errStrings := cfg.presetFromIPFS(); len(errStrings) > 0 {
 			argErrs = append(argErrs, errStrings...)
 		}
 	}
@@ -179,8 +187,8 @@ func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
 		argErrs = append(argErrs, "The value of --hash-bits must be a minimum of 128 and be divisible by 8")
 	}
 
-	if !optSet.IsSet("inline-max-size") &&
-		!optSet.IsSet("ipfs-add-compatible-command") &&
+	if !cfg.optSet.IsSet("inline-max-size") &&
+		!cfg.optSet.IsSet("ipfs-add-compatible-command") &&
 		cfg.requestedLinkers != "none" {
 		argErrs = append(argErrs, "You must specify a valid value for --inline-max-size")
 	} else if cfg.InlineMaxSize < 0 ||
@@ -202,39 +210,44 @@ func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
 		))
 	} else {
 
+		if cfg.hashAlg == "none" && !cfg.optSet.IsSet("async-hashers") {
+			cfg.AsyncHashers = 0
+		}
+
 		var errStr string
 		blockMaker, errStr = block.MakerFromConfig(
 			cfg.hashAlg,
 			cfg.HashBits/8,
 			cfg.InlineMaxSize,
-			cfg.AsyncHashing,
+			cfg.AsyncHashers,
 		)
 		if errStr != "" {
 			argErrs = append(argErrs, errStr)
 		}
 	}
 
-	if errorStrings := parseEmitterSpecs(cfg); len(errorStrings) > 0 {
+	if errorStrings := cfg.parseEmitterSpecs(); len(errorStrings) > 0 {
 		argErrs = append(argErrs, errorStrings...)
 	} else {
-		// setup block-aggregation callback if needed
-		for _, needsAggregation := range []string{
-			emStatsText,
-			emStatsJsonl,
+		// setup fifo callback if needed
+		for _, carType := range []string{
 			emCarV0Fifos,
 			emCarV0RootlessStream,
 		} {
-			if cfg.emitters[needsAggregation] != nil {
-				cfg.stats.seenBlocks = make(seenBlocks, 1024) // SANCHECK: somewhat arbitrary, but eh...
-				cfg.stats.seenRoots = make(seenRoots, 32)
-				break
-			}
-		}
+			if cfg.emitters[carType] != nil {
 
-		if cfg.emitters[emCarV0Fifos] != nil || cfg.emitters[emCarV0RootlessStream] != nil {
-			cfg.uniqueBlockCallback = func(hdr *block.Header) blockPostProcessResult {
-				util.InternalPanicf("car writing not yet implemented") // FIXME
-				return blockPostProcessResult{}
+				if (dgr.cfg.StatsEnabled & statsBlocks) != statsBlocks {
+					argErrs = append(argErrs, fmt.Sprintf(
+						"disabled blockstat collection required by emitter '%s'",
+						carType,
+					))
+					break
+				}
+
+				dgr.uniqueBlockCallback = func(hdr *block.Header) blockPostProcessResult {
+					util.InternalPanicf("car writing not yet implemented") // FIXME
+					return blockPostProcessResult{}
+				}
 			}
 		}
 	}
@@ -244,23 +257,23 @@ func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
 			"You must specify at least one stream chunker via '--chunkers=algname1:opt1:opt2::algname2:...'. Available chunker names are: "+
 				util.AvailableMapKeys(availableChunkers),
 		)
-	} else if errorStrings := setupChunkerChain(cfg); len(errorStrings) > 0 {
+	} else if errorStrings := dgr.setupChunkerChain(); len(errorStrings) > 0 {
 		argErrs = append(argErrs, errorStrings...)
 	}
 
-	if optSet.IsSet("linkers") && cfg.requestedLinkers == "" {
+	if cfg.optSet.IsSet("linkers") && cfg.requestedLinkers == "" {
 		argErrs = append(argErrs,
 			"When specified linker chain must be in the form '--linkers=algname1:opt1:opt2::algname2:...'. Available linker names are: "+
 				util.AvailableMapKeys(availableLinkers),
 		)
-	} else if errorStrings := setupLinkerChain(cfg, blockMaker); len(errorStrings) > 0 {
+	} else if errorStrings := dgr.setupLinkerChain(blockMaker); len(errorStrings) > 0 {
 		argErrs = append(argErrs, errorStrings...)
 	}
 
 	if len(argErrs) != 0 {
 
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
-		printUsage(optSet, cfg)
+		cfg.printUsage()
 
 		sort.Strings(argErrs)
 		fmt.Fprintf(
@@ -272,32 +285,32 @@ func ParseOpts(argv []string) (*config, util.PanicfWrapper) {
 	}
 
 	// Opts are good - populate what we ended up with
-	optSet.VisitAll(func(o getopt.Option) {
+	cfg.optSet.VisitAll(func(o getopt.Option) {
 		switch o.LongName() {
 		case "help", "help-all", "ipfs-add-compatible-command":
 			// do nothing for these
 		default:
-			cfg.stats.summary.SysStats.ArgvExpanded = append(
-				cfg.stats.summary.SysStats.ArgvExpanded, fmt.Sprintf(`--%s=%s`,
+			dgr.statSummary.SysStats.ArgvExpanded = append(
+				dgr.statSummary.SysStats.ArgvExpanded, fmt.Sprintf(`--%s=%s`,
 					o.LongName(),
 					o.Value().String(),
 				),
 			)
 		}
 	})
-	sort.Strings(cfg.stats.summary.SysStats.ArgvExpanded)
+	sort.Strings(dgr.statSummary.SysStats.ArgvExpanded)
 
 	// panic with better stream-position context ( where possible )
-	return cfg, func(f string, a ...interface{}) {
+	return dgr, func(f string, a ...interface{}) {
 		prefix := fmt.Sprintf("INTERNAL ERROR\tstream:%d\tpos:%d\n======================\n",
-			cfg.stats.totalStreams, cfg.stats.curStreamOffset,
+			dgr.statSummary.Streams, dgr.curStreamOffset,
 		)
 		panic(fmt.Sprintf(prefix+f, a...))
 	}
 }
 
-func printUsage(optSet *getopt.Set, cfg *config) {
-	optSet.PrintUsage(argParseErrOut)
+func (cfg *config) printUsage() {
+	cfg.optSet.PrintUsage(argParseErrOut)
 	if cfg.HelpAll {
 		printPluginUsage(argParseErrOut)
 	} else {
@@ -359,41 +372,40 @@ func printPluginUsage(out io.Writer) {
 	fmt.Fprint(out, "\n")
 }
 
-func makeArgvParser(cfg *config) (optSet *getopt.Set) {
+func (cfg *config) initArgvParser() {
 	// The default documented way of using pborman/options is to muck with globals
 	// Operate over objects instead, allowing us to re-parse argv multiple times
-	optSet = getopt.New()
-	if err := options.RegisterSet("", cfg, optSet); err != nil {
+	o := getopt.New()
+	if err := options.RegisterSet("", cfg, o); err != nil {
 		log.Fatalf("Option set registration failed: %s", err)
 	}
+	cfg.optSet = o
 
 	// program does not take freeform args
 	// need to override this for sensible help render
-	optSet.SetParameters("")
+	o.SetParameters("")
 
 	// Several options have the help assembled programmatically
-	optSet.FlagLong(&cfg.hashAlg, "hash", 0, "Hash algorithm to use, one of: "+util.AvailableMapKeys(block.AvailableHashers))
-	optSet.FlagLong(&cfg.requestedChunkers, "chunkers", 0,
+	o.FlagLong(&cfg.hashAlg, "hash", 0, "Hash algorithm to use, one of: "+util.AvailableMapKeys(block.AvailableHashers))
+	o.FlagLong(&cfg.requestedChunkers, "chunkers", 0,
 		"Stream chunking algorithm chain. Each chunker is one of: "+util.AvailableMapKeys(availableChunkers),
 		"'ch1:o1.1:o1.2:...:o1.N::ch2:o2.1:o2.2:...:o2.N::ch3...'",
 	)
-	optSet.FlagLong(&cfg.requestedLinkers, "linkers", 0,
+	o.FlagLong(&cfg.requestedLinkers, "linkers", 0,
 		"Block linking algorithm chain. Each linker is one of: "+util.AvailableMapKeys(availableLinkers),
 		"'ln1:o1.1:o1.2:...:o1.N::ln.2...'",
 	)
-	optSet.FlagLong(&cfg.emittersStdErr, "emit-stderr", 0, fmt.Sprintf(
+	o.FlagLong(&cfg.emittersStdErr, "emit-stderr", 0, fmt.Sprintf(
 		"One or more emitters to activate on stdERR. Available emitters are %s. Default: ",
 		util.AvailableMapKeys(cfg.emitters),
 	), "commaSepEmitters")
-	optSet.FlagLong(&cfg.emittersStdOut, "emit-stdout", 0,
+	o.FlagLong(&cfg.emittersStdOut, "emit-stdout", 0,
 		"One or more emitters to activate on stdOUT. Available emitters same as above. Default: ",
 		"commaSepEmitters",
 	)
-
-	return optSet
 }
 
-func parseEmitterSpecs(cfg *config) (argErrs []string) {
+func (cfg *config) parseEmitterSpecs() (argErrs []string) {
 	activeStderr := make(map[string]bool, len(cfg.emittersStdErr))
 	for _, s := range cfg.emittersStdErr {
 		activeStderr[s] = true
@@ -448,13 +460,13 @@ func parseEmitterSpecs(cfg *config) (argErrs []string) {
 	return argErrs
 }
 
-func setupChunkerChain(cfg *config) (argErrs []string) {
+func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 	commonCfg := chunker.CommonConfig{
-		GlobalMaxChunkSize: cfg.GlobalMaxChunkSize,
+		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
 		InternalPanicf:     util.InternalPanicf,
 	}
 
-	individualChunkers := strings.Split(cfg.requestedChunkers, "::")
+	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "::")
 
 	for _, chunkerCmd := range individualChunkers {
 		chunkerArgs := strings.Split(chunkerCmd, ":")
@@ -486,25 +498,25 @@ func setupChunkerChain(cfg *config) (argErrs []string) {
 				))
 			}
 		} else {
-			cfg.chainedChunkers = append(cfg.chainedChunkers, chunkerInstance)
+			dgr.chainedChunkers = append(dgr.chainedChunkers, chunkerInstance)
 		}
 	}
 
 	return argErrs
 }
 
-func setupLinkerChain(cfg *config, bm block.Maker) (argErrs []string) {
+func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string) {
 	commonCfg := linker.CommonConfig{
 		InternalPanicf:     util.InternalPanicf,
 		GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
 		BlockMaker:         bm,
-		HasherName:         cfg.hashAlg,
-		HasherBits:         cfg.HashBits,
+		HasherName:         dgr.cfg.hashAlg,
+		HasherBits:         dgr.cfg.HashBits,
 	}
 
-	individualLinkers := strings.Split(cfg.requestedLinkers, "::")
+	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "::")
 
-	cfg.chainedLinkers = make([]linker.Linker, len(individualLinkers))
+	dgr.chainedLinkers = make([]linker.Linker, len(individualLinkers))
 	// we need to process the linkers in reverse, in order to populate NextLinker
 	for linkerNum := len(individualLinkers) - 1; linkerNum >= 0; linkerNum-- {
 
@@ -531,9 +543,8 @@ func setupLinkerChain(cfg *config, bm block.Maker) (argErrs []string) {
 		linkerCfg := commonCfg // SHALLOW COPY!!!
 		// every linker gets a callback with their own index closed over
 		linkerCfg.NewLinkBlockCallback = func(hdr *block.Header, linkerLayer int, links []*block.Header) {
-			cfg.asyncWG.Add(1)
-			go registerNewBlock(
-				cfg,
+			dgr.asyncWG.Add(1)
+			go dgr.registerNewBlock(
 				hdr,
 				generatedBy{generatorIdx, linkerLayer},
 				links,
@@ -542,7 +553,7 @@ func setupLinkerChain(cfg *config, bm block.Maker) (argErrs []string) {
 		}
 
 		if linkerNum != len(individualLinkers)-1 {
-			linkerCfg.NextLinker = cfg.chainedLinkers[linkerNum+1]
+			linkerCfg.NextLinker = dgr.chainedLinkers[linkerNum+1]
 		}
 
 		if linkerInstance, initErrors := init(
@@ -558,7 +569,7 @@ func setupLinkerChain(cfg *config, bm block.Maker) (argErrs []string) {
 				))
 			}
 		} else {
-			cfg.chainedLinkers[linkerNum] = linkerInstance
+			dgr.chainedLinkers[linkerNum] = linkerInstance
 		}
 	}
 
@@ -575,7 +586,7 @@ type compatIpfsArgs struct {
 	Chunker       string `getopt:"--chunker"`
 }
 
-func presetFromIPFS(cfg *config, mainOptSet *getopt.Set) (parseErrors []string) {
+func (cfg *config) presetFromIPFS() (parseErrors []string) {
 
 	lVals, optSet := options.RegisterNew("", &compatIpfsArgs{
 		Chunker:    "size",
@@ -604,11 +615,11 @@ func presetFromIPFS(cfg *config, mainOptSet *getopt.Set) (parseErrors []string) 
 		return parseErrors
 	}
 
-	if !mainOptSet.IsSet("hash") {
+	if !cfg.optSet.IsSet("hash") {
 		cfg.hashAlg = "sha2-256"
 	}
 
-	if !mainOptSet.IsSet("inline-max-size") {
+	if !cfg.optSet.IsSet("inline-max-size") {
 		if ipfsOpts.InlineActive {
 			if optSet.IsSet("inline-limit") {
 				cfg.InlineMaxSize = ipfsOpts.InlineLimit
@@ -621,7 +632,7 @@ func presetFromIPFS(cfg *config, mainOptSet *getopt.Set) (parseErrors []string) 
 	}
 
 	// ignore everything compat if a linker is already given
-	if !mainOptSet.IsSet("linkers") {
+	if !cfg.optSet.IsSet("linkers") {
 
 		var linkerOpts []string
 
@@ -669,7 +680,7 @@ func presetFromIPFS(cfg *config, mainOptSet *getopt.Set) (parseErrors []string) 
 	}
 
 	// ignore everything compat if a chunker is already given
-	if !mainOptSet.IsSet("chunkers") {
+	if !cfg.optSet.IsSet("chunkers") {
 
 		if strings.HasPrefix(ipfsOpts.Chunker, "size") {
 			sizeopts := strings.Split(ipfsOpts.Chunker, "-")

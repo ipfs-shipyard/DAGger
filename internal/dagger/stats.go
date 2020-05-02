@@ -6,7 +6,6 @@ import (
 	"log"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
@@ -22,6 +21,9 @@ var textstatsDistributionPercentiles = [...]int{3, 10, 25, 50, 95}
 // We could remove it, but for now there's no reason to, and as an extra
 // benefit it makes the murmur3 case *way* easier to code
 const seenHashSize = 128 / 8
+
+type blockPostProcessResult struct {
+}
 
 type seenBlocks map[[seenHashSize]byte]uniqueBlockStats
 type seenRoots map[[seenHashSize]byte][]byte
@@ -43,29 +45,39 @@ func seenKey(b *block.Header) *[seenHashSize]byte {
 	return &id
 }
 
-type runStats struct {
-	// separate sub-struct for clarity
-	summary struct {
-		Event string `json:"event"`
-		Dag   struct {
-			Nodes   int64 `json:"nodes"`
-			Size    int64 `json:"wireSize"`
-			Payload int64 `json:"payload"`
-		} `json:"logicalDag"`
-		Roots    []rootStats  `json:"roots"`
-		Layers   []layerStats `json:"layers"`
-		SysStats struct {
-			ArgvExpanded []string `json:"argvExpanded"`
-			ArgvInitial  []string `json:"argvInitial"`
-			qringbuf.Stats
-			ElapsedNsecs int64 `json:"elapsedNanoseconds"`
-		} `json:"sys"`
-	}
-	totalStreams    int64
-	curStreamOffset int64
-	seenBlocks      seenBlocks
-	seenRoots       seenRoots
-	mu              sync.Mutex
+type statSummary struct {
+	EventType string `json:"event"`
+	Dag       struct {
+		Nodes   int64 `json:"nodes"`
+		Size    int64 `json:"wireSize"`
+		Payload int64 `json:"payload"`
+	} `json:"logicalDag"`
+	Streams  int64        `json:"subStreams"`
+	Roots    []rootStats  `json:"roots,omitempty"`
+	Layers   []layerStats `json:"layers,omitempty"`
+	SysStats struct {
+		ArgvExpanded []string `json:"argvExpanded"`
+		ArgvInitial  []string `json:"argvInitial"`
+		qringbuf.Stats
+		ElapsedNsecs int64 `json:"elapsedNanoseconds"`
+
+		// getrusage() section
+		CpuUserNsecs int64 `json:"cpuUserNanoseconds"`
+		CpuSysNsecs  int64 `json:"cpuSystemNanoseconds"`
+		MaxRssBytes  int64 `json:"maxMemoryUsed"`
+		MinFlt       int64 `json:"cacheMinorFaults"`
+		MajFlt       int64 `json:"cacheMajorFaults"`
+		BioRead      int64 `json:"blockIoReads,omitempty"`
+		BioWrite     int64 `json:"blockIoWrites,omitempty"`
+		Sigs         int64 `json:"signalsReceived,omitempty"`
+		CtxSwYield   int64 `json:"contextSwitchYields"`
+		CtxSwForced  int64 `json:"contextSwitchForced"`
+
+		// for context
+		PageSize  int    `json:"pageSize"`
+		NumCPU    int    `json:"cpuCount"`
+		GoVersion string `json:"goVersion"`
+	} `json:"sys"`
 }
 type layerStats struct {
 	label     string
@@ -98,19 +110,20 @@ type generatedBy struct {
 }
 type seenTimesAt map[generatedBy]int64
 
-func OutputSummary(cfg *config) {
+func (dgr *Dagger) OutputSummary() {
 
-	// no stats enabled - nothing to calc
-	if cfg.emitters[emStatsText] == nil && cfg.emitters[emStatsJsonl] == nil {
+	// no stats emitters - nowhere to output
+	if dgr.cfg.emitters[emStatsText] == nil && dgr.cfg.emitters[emStatsJsonl] == nil {
 		return
 	}
 
+	smr := &dgr.statSummary
 	var totalUCount, totalUWeight, leafUWeight, leafUCount, sparseUWeight, sparseUCount int64
 
-	if cfg.stats.seenBlocks != nil && len(cfg.stats.seenBlocks) > 0 {
+	if dgr.seenBlocks != nil && len(dgr.seenBlocks) > 0 {
 		layers := make(map[generatedBy]*layerStats, 10) // if more than 10 layers - something odd is going on
 
-		for sk, b := range cfg.stats.seenBlocks {
+		for sk, b := range dgr.seenBlocks {
 			totalUCount++
 			totalUWeight += int64(b.sizeBlock)
 
@@ -135,7 +148,7 @@ func OutputSummary(cfg *config) {
 			}
 			layers[gens[0]].countTracker[b.sizeBlock].CountUniqueBlocksAtSize++
 
-			if _, root := cfg.stats.seenRoots[sk]; root {
+			if _, root := dgr.seenRoots[sk]; root {
 				layers[gens[0]].countTracker[b.sizeBlock].CountRootBlocksAtSize++
 			}
 		}
@@ -176,23 +189,23 @@ func OutputSummary(cfg *config) {
 				return layers[g].BlockSizeCounts[i].SizeBlock < layers[g].BlockSizeCounts[j].SizeBlock
 			})
 
-			cfg.stats.summary.Layers = append(cfg.stats.summary.Layers, *layers[g])
+			smr.Layers = append(smr.Layers, *layers[g])
 		}
 	}
 
-	if statsJosnlOut := cfg.emitters[emStatsJsonl]; statsJosnlOut != nil {
+	if statsJosnlOut := dgr.cfg.emitters[emStatsJsonl]; statsJosnlOut != nil {
 		// emit the JSON last, so that piping to e.g. `jq` works nicer
 		defer func() {
 
 			// because the golang encoder is garbage
-			if cfg.stats.summary.Layers == nil {
-				cfg.stats.summary.Layers = []layerStats{}
+			if smr.Layers == nil {
+				smr.Layers = []layerStats{}
 			}
-			if cfg.stats.summary.Roots == nil {
-				cfg.stats.summary.Roots = []rootStats{}
+			if smr.Roots == nil {
+				smr.Roots = []rootStats{}
 			}
 
-			json, err := json.Marshal(cfg.stats.summary)
+			json, err := json.Marshal(smr)
 			if err != nil {
 				log.Fatalf("Encoding stats-jsonl failed: %s", err)
 			}
@@ -203,16 +216,16 @@ func OutputSummary(cfg *config) {
 		}()
 	}
 
-	statsTextOut := cfg.emitters[emStatsText]
+	statsTextOut := dgr.cfg.emitters[emStatsText]
 	if statsTextOut == nil {
 		return
 	}
 
 	var substreamsDesc string
-	if cfg.MultipartStream {
+	if dgr.cfg.MultipartStream {
 		substreamsDesc = fmt.Sprintf(
 			" from %s substreams",
-			util.Commify64(cfg.stats.totalStreams),
+			util.Commify64(dgr.statSummary.Streams),
 		)
 	}
 
@@ -223,34 +236,51 @@ func OutputSummary(cfg *config) {
 	}
 
 	writeTextOutf(
-		"\nPerformed %s read()s in %0.3f seconds at about %0.2f MiB/s"+
-			"\nProcessed a total of:%15s bytes%s\n\n",
-		util.Commify64(cfg.stats.summary.SysStats.ReadCalls),
-		float64(cfg.stats.summary.SysStats.ElapsedNsecs)/1000000000,
-		(float64(cfg.stats.summary.Dag.Payload)/(1024*1024))/(float64(cfg.stats.summary.SysStats.ElapsedNsecs)/1000000000),
-		util.Commify64(cfg.stats.summary.Dag.Payload),
+		"\nProcessing took %0.2f seconds using %0.2f vCPU and %0.2f MiB peak memory"+
+			"\nPerforming %s system reads using %0.2f vCPU at about %0.2f MiB/s"+
+			"\nIngesting payload of:%15s bytes%s\n\n",
+
+		float64(smr.SysStats.ElapsedNsecs)/
+			1000000000,
+
+		float64(smr.SysStats.CpuUserNsecs)/
+			float64(smr.SysStats.ElapsedNsecs),
+
+		float64(smr.SysStats.MaxRssBytes)/
+			(1024*1024),
+
+		util.Commify64(smr.SysStats.ReadCalls),
+
+		float64(smr.SysStats.CpuSysNsecs)/
+			float64(smr.SysStats.ElapsedNsecs),
+
+		(float64(smr.Dag.Payload)/(1024*1024))/
+			(float64(smr.SysStats.ElapsedNsecs)/1000000000),
+
+		util.Commify64(smr.Dag.Payload),
+
 		substreamsDesc,
 	)
 
-	if len(cfg.stats.summary.Roots) > 0 {
+	if len(smr.Roots) > 0 {
 		writeTextOutf(
 			"Forming DAG covering:%15s bytes across %s nodes\n",
-			util.Commify64(cfg.stats.summary.Dag.Size), util.Commify64(cfg.stats.summary.Dag.Nodes),
+			util.Commify64(smr.Dag.Size), util.Commify64(smr.Dag.Nodes),
 		)
 	}
 
-	if len(cfg.stats.summary.Layers) == 0 {
+	if len(smr.Layers) == 0 {
 		return
 	}
 
 	descParts := make([]string, 0, 32)
 
 	descParts = append(descParts, fmt.Sprintf(
-		"Dataset dedupes into:%15s bytes over %s unique leaf nodes\n",
+		"Dataset deduped into:%15s bytes over %s unique leaf nodes\n",
 		util.Commify64(leafUWeight), util.Commify64(leafUCount),
 	))
 
-	if len(cfg.stats.summary.Layers) > 1 {
+	if len(smr.Layers) > 1 {
 		descParts = append(descParts, fmt.Sprintf(
 			"Linked as streams by:%15s bytes over %s unique DAG-PB nodes\n"+
 				"Taking a grand-total:%15s bytes, ",
@@ -264,8 +294,8 @@ func OutputSummary(cfg *config) {
 	descParts = append(descParts, fmt.Sprintf(
 		"%.02f%% of original, %.01fx smaller\n"+
 			` Roots\Counts\Sizes:`,
-		100*float64(totalUWeight)/float64(cfg.stats.summary.Dag.Payload),
-		float64(cfg.stats.summary.Dag.Payload)/float64(totalUWeight),
+		100*float64(totalUWeight)/float64(smr.Dag.Payload),
+		float64(smr.Dag.Payload)/float64(totalUWeight),
 	))
 
 	for i, val := range textstatsDistributionPercentiles {
@@ -277,7 +307,7 @@ func OutputSummary(cfg *config) {
 	}
 	descParts = append(descParts, " |      Avg\n")
 
-	for _, ls := range cfg.stats.summary.Layers {
+	for _, ls := range smr.Layers {
 		descParts = append(descParts, distributionForLayer(ls))
 	}
 

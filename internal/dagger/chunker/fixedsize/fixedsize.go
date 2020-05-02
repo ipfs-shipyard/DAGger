@@ -14,18 +14,16 @@ type fixedSizeChunker struct {
 
 func (c *fixedSizeChunker) MinChunkSize() int { return c.size }
 
-func (c *fixedSizeChunker) Split(buf []byte, moreDataNextInvocation bool, slices chan<- chunker.SplitResult) {
-	defer close(slices)
-
+func (c *fixedSizeChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
 	curIdx := c.size
 
 	for curIdx < len(buf) {
-		slices <- chunker.SplitResult{Size: c.size}
+		cb(chunker.Chunk{Size: c.size})
 		curIdx += c.size
 	}
 
 	if curIdx-c.size < len(buf) && !moreDataNextInvocation {
-		slices <- chunker.SplitResult{Size: len(buf) - (curIdx - c.size)}
+		cb(chunker.Chunk{Size: len(buf) - (curIdx - c.size)})
 	}
 }
 
@@ -36,7 +34,7 @@ func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, in
 	if args == nil {
 		return nil, util.SubHelp(
 			"Splits buffer into equally sized chunks. Requires a single parameter: the\n"+
-				"size of each chunk in bytes (IPFS default: 262144)",
+				"size of each chunk in bytes (IPFS default: 262144)\n",
 			nil,
 		)
 	}

@@ -121,7 +121,7 @@ type Maker func(
 ) *Header
 
 type DataSource struct {
-	chunker.SplitResult
+	chunker.Chunk
 	Content *zcpstring.ZcpString
 }
 
@@ -161,14 +161,14 @@ func MakerFromConfig(
 	hashAlg string,
 	cidHashSize int,
 	inlineMaxSize int,
-	asyncHashing bool,
+	maxAsyncHashers int,
 ) (maker Maker, errString string) {
 	var nativeHashSize int
 
 	hashopts, found := AvailableHashers[hashAlg]
 	if !found {
 		return nil, fmt.Sprintf(
-			"Invalid hashing algorithm '%s'. Available hash algorithms are %s",
+			"invalid hashing algorithm '%s'. Available hash algorithms are %s",
 			hashAlg,
 			util.AvailableMapKeys(AvailableHashers),
 		)
@@ -182,9 +182,16 @@ func MakerFromConfig(
 
 	if nativeHashSize < cidHashSize {
 		return nil, fmt.Sprintf(
-			"Selected hash algorithm '%s' does not produce a digest satisfying the requested hash bits '%d'",
+			"selected hash algorithm '%s' does not produce a digest satisfying the requested hash bits '%d'",
 			hashAlg,
 			cidHashSize*8,
+		)
+	}
+
+	if maxAsyncHashers < 0 {
+		return nil, fmt.Sprintf(
+			"invalid negative value '%d' for maxAsyncHashers",
+			maxAsyncHashers,
 		)
 	}
 
@@ -202,6 +209,11 @@ func MakerFromConfig(
 	// case that we spawn an actual goroutine: then we make a *new* channel
 	cidPreMadeChan := make(chan struct{})
 	close(cidPreMadeChan)
+
+	var asyncRateLimiter chan struct{}
+	if maxAsyncHashers > 0 {
+		asyncRateLimiter = make(chan struct{}, maxAsyncHashers)
+	}
 
 	maker = func(
 		blockContent *zcpstring.ZcpString,
@@ -293,14 +305,16 @@ func MakerFromConfig(
 
 			hasher := hashopts.hasherMaker()
 
-			if !asyncHashing {
+			if maxAsyncHashers == 0 {
 				blockContent.WriteTo(hasher)
 				hdr.cid = (hasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
 			} else {
 				hdr.cidReady = make(chan struct{})
+				asyncRateLimiter <- struct{}{}
 				go func() {
 					hdr.PeekContent().WriteTo(hasher)
 					hdr.cid = (hasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
+					<-asyncRateLimiter
 					close(hdr.cidReady)
 				}()
 			}

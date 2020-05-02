@@ -6,6 +6,8 @@ import (
 	"os"
 	"runtime"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/ipfs-shipyard/DAGger/constants"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
@@ -13,16 +15,16 @@ import (
 
 func main() {
 
-	// Parse CLI and initialize everything
-	// On error it will log.Fatal() on its own
-	cfg, panicfWrapper := dagger.ParseOpts(os.Args)
-
-	util.InternalPanicf = panicfWrapper
-
 	inStat, statErr := os.Stdin.Stat()
 	if statErr != nil {
-		panicfWrapper("unexpected error stat()ing stdIN: %s", statErr)
+		log.Fatalf("unexpected error stat()ing stdIN: %s", statErr)
 	}
+
+	// Parse CLI and initialize everything
+	// On error it will log.Fatal() on its own
+	dgr, panicfWrapper := dagger.NewFromArgv(os.Args)
+
+	util.InternalPanicf = panicfWrapper
 
 	if 0 != (inStat.Mode() & os.ModeCharDevice) {
 		// do not try to optimize a TTY
@@ -38,18 +40,29 @@ func main() {
 		}
 	}
 
+	// func() wrapper for multiple defer triggers, before stat emission
 	processErr := func() error {
-
 		if util.ProfileStartStop != nil {
 			defer util.ProfileStartStop()()
 		} else if constants.PerformSanityChecks {
+
+			// when we get here we should have shut down every goroutine there is
+			expectRunning := 1
+			if runtime.NumGoroutine() > expectRunning {
+				log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
+					expectRunning,
+					runtime.NumGoroutine(),
+				)
+				p, _ := os.FindProcess(os.Getpid())
+				p.Signal(unix.SIGQUIT)
+			}
+
 			// needed to trigger the zcpstring overallocation guards
 			defer runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
 			defer runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
 		}
 
-		return dagger.ProcessReader(
-			cfg,
+		return dgr.ProcessReader(
 			os.Stdin,
 			nil,
 		)
@@ -59,5 +72,5 @@ func main() {
 		log.Fatalf("Unexpected error processing STDIN: %s", processErr)
 	}
 
-	dagger.OutputSummary(cfg)
+	dgr.OutputSummary()
 }

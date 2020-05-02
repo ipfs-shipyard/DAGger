@@ -29,7 +29,6 @@ func setupProfiling() (profilingStopper func()) {
 
 	cpuProfFh := openProfHandle("cpu", pathPrefix, &openHandles)
 	heapProfFh := openProfHandle("heap", pathPrefix, &openHandles)
-	allocsProfFh := openProfHandle("allocs", pathPrefix, &openHandles)
 
 	runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
 	runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
@@ -51,13 +50,6 @@ func setupProfiling() (profilingStopper func()) {
 		if err := pprof.Lookup("heap").WriteTo(heapProfFh, 0); err != nil {
 			log.Printf(
 				"Error writing out 'heap' profile: %s",
-				err,
-			)
-		}
-
-		if err := pprof.Lookup("allocs").WriteTo(allocsProfFh, 0); err != nil {
-			log.Printf(
-				"Error writing out 'allocs' profile: %s",
 				err,
 			)
 		}

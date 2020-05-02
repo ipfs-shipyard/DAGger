@@ -83,9 +83,8 @@ func TestGoIpfsConvergence(t *testing.T) {
 
 				roots := make(chan *block.Header, 128)
 
-				cfg, _ := ParseOpts(args)
-				streamErr := ProcessReader(
-					cfg,
+				dgr, _ := NewFromArgv(args)
+				streamErr := dgr.ProcessReader(
 					dataIn,
 					roots,
 				)

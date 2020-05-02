@@ -14,53 +14,78 @@ import (
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	"github.com/ipfs-shipyard/DAGger/internal/zcpstring"
 	"github.com/ipfs/go-qringbuf"
+	"golang.org/x/sys/unix"
 )
 
 // SANCHECK: not sure if any of these make sense, nor have I measured the cost
 const (
-	subChunksQueueSizeLevel0 = 256
-	subChunksQueueSizeLevelN = 16
+	chunkQueueSizeTop      = 32
+	chunkQueueSizeSubchunk = 8
 )
 
-func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver chan<- *block.Header) error {
+func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver chan<- *block.Header) error {
 
 	var initErr error
-	cfg.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
+	dgr.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
 		// MinRegion must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
 		// SANCHECK: this may not necessarily be true...
-		MinRegion:  2 * cfg.GlobalMaxChunkSize,
-		MinRead:    cfg.RingBufferMinRead,
-		MaxCopy:    2 * cfg.GlobalMaxChunkSize, // SANCHECK goes with above
-		BufferSize: cfg.RingBufferSize,
-		SectorSize: cfg.RingBufferSectSize,
-		Stats:      &cfg.stats.summary.SysStats.Stats,
+		MinRegion:   2 * dgr.cfg.GlobalMaxChunkSize,
+		MinRead:     dgr.cfg.RingBufferMinRead,
+		MaxCopy:     2 * dgr.cfg.GlobalMaxChunkSize, // SANCHECK goes with above
+		BufferSize:  dgr.cfg.RingBufferSize,
+		SectorSize:  dgr.cfg.RingBufferSectSize,
+		Stats:       &dgr.statSummary.SysStats.Stats,
+		TrackTiming: ((dgr.cfg.StatsEnabled & statsRingbuf) == statsRingbuf),
 	})
-
 	if initErr != nil {
 		return initErr
 	}
 
+	if (dgr.cfg.StatsEnabled & statsBlocks) == statsBlocks {
+		dgr.seenBlocks = make(seenBlocks, 1024) // SANCHECK: somewhat arbitrary, but eh...
+		dgr.seenRoots = make(seenRoots, 32)
+	}
+
 	// use 64bits everywhere
-	var substreamBytes int64
+	var substreamSize int64
 
-	t0 := time.Now()
+	var t0 time.Time
+	var r0, r1 unix.Rusage
+
 	defer func() {
-		// we need to finish all stat writes before we return
-		defer cfg.asyncWG.Wait()
+		sys := &dgr.statSummary.SysStats
 
-		cfg.stats.summary.SysStats.ElapsedNsecs = time.Since(t0).Nanoseconds()
+		// we need to finish all emissions to complete before we measure/return
+		dgr.asyncWG.Wait()
+
+		sys.ElapsedNsecs = time.Since(t0).Nanoseconds()
+		unix.Getrusage(unix.RUSAGE_SELF, &r1) // ignore errors
+
+		sys.CpuUserNsecs = unix.TimevalToNsec(r1.Utime) - unix.TimevalToNsec(r0.Utime)
+		sys.CpuSysNsecs = unix.TimevalToNsec(r1.Stime) - unix.TimevalToNsec(r0.Stime)
+		sys.MaxRssBytes = r1.Maxrss
+		sys.MinFlt = r1.Minflt - r0.Minflt
+		sys.MajFlt = r1.Majflt - r0.Majflt
+		sys.BioRead = r1.Inblock - r0.Inblock
+		sys.BioWrite = r1.Oublock - r0.Oublock
+		sys.Sigs = r1.Nsignals - r0.Nsignals
+		sys.CtxSwYield = r1.Nvcsw - r0.Nvcsw
+		sys.CtxSwForced = r1.Nivcsw - r0.Nivcsw
 	}()
+
+	unix.Getrusage(unix.RUSAGE_SELF, &r0) // ignore errors
+	t0 = time.Now()
 
 	// outer stream loop: read() syscalls happen only here and in the qrb.collector()
 	for {
-		if cfg.MultipartStream {
+		if dgr.cfg.MultipartStream {
 
 			err := binary.Read(
 				inputReader,
 				binary.BigEndian,
-				&substreamBytes,
+				&substreamSize,
 			)
-			cfg.stats.summary.SysStats.ReadCalls++
+			dgr.statSummary.SysStats.ReadCalls++
 
 			if err == io.EOF {
 				// no new multipart coming - bail
@@ -72,39 +97,39 @@ func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver cha
 				)
 			}
 
-			if substreamBytes == 0 && !cfg.ProcessNulInputs {
+			if substreamSize == 0 && !dgr.cfg.ProcessNulInputs {
 				continue
 			}
 
-			cfg.stats.totalStreams++
-			cfg.stats.curStreamOffset = 0
+			dgr.statSummary.Streams++
+			dgr.curStreamOffset = 0
 		}
 
-		if cfg.MultipartStream && substreamBytes == 0 {
+		if dgr.cfg.MultipartStream && substreamSize == 0 {
 			// If we got here: cfg.ProcessNulInputs is true
 			// Special case for a one-time zero-CID emission
-			_injectZeroLeaf(cfg)
-		} else if err := processStream(cfg, substreamBytes); err != nil {
+			dgr.injectZeroLeaf()
+		} else if err := dgr.processStream(substreamSize); err != nil {
 			if err == io.ErrUnexpectedEOF {
 				return fmt.Errorf(
 					"unexpected end of substream #%s after %s bytes (stream expected to be %s bytes long)",
-					util.Commify64(cfg.stats.totalStreams),
-					util.Commify64(cfg.stats.curStreamOffset+int64(cfg.qrb.Buffered())),
-					util.Commify64(substreamBytes),
+					util.Commify64(dgr.statSummary.Streams),
+					util.Commify64(dgr.curStreamOffset+int64(dgr.qrb.Buffered())),
+					util.Commify64(substreamSize),
 				)
 			} else if err != io.EOF {
 				return err
-			} else if cfg.stats.curStreamOffset == 0 && cfg.ProcessNulInputs {
+			} else if dgr.curStreamOffset == 0 && dgr.cfg.ProcessNulInputs {
 				// we did try to process a stream and ended up with an EOF + 0
 				// emit a zero-CID like above
-				_injectZeroLeaf(cfg)
+				dgr.injectZeroLeaf()
 			}
 		}
 
-		if cfg.generateRoots || cfg.stats.seenBlocks != nil || optionalRootsReceiver != nil {
+		if dgr.cfg.generateRoots || dgr.seenRoots != nil || optionalRootsReceiver != nil {
 
 			// pull the root out of the last member of the linker chain
-			rootBlock := cfg.chainedLinkers[len(cfg.chainedLinkers)-1].DeriveRoot()
+			rootBlock := dgr.chainedLinkers[len(dgr.chainedLinkers)-1].DeriveRoot()
 
 			// send a struct, nil or not
 			if optionalRootsReceiver != nil {
@@ -113,29 +138,32 @@ func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver cha
 
 			if rootBlock != nil {
 
-				if cfg.stats.seenRoots != nil {
-					var rootSeen bool
+				if dgr.seenRoots != nil {
+					dgr.mu.Lock()
 
+					var rootSeen bool
 					if sk := seenKey(rootBlock); sk != nil {
-						if _, rootSeen = cfg.stats.seenRoots[*sk]; !rootSeen {
-							cfg.stats.seenRoots[*sk] = rootBlock.Cid()
+						if _, rootSeen = dgr.seenRoots[*sk]; !rootSeen {
+							dgr.seenRoots[*sk] = rootBlock.Cid()
 						}
 					}
 
-					cfg.stats.summary.Roots = append(cfg.stats.summary.Roots, rootStats{
+					dgr.statSummary.Roots = append(dgr.statSummary.Roots, rootStats{
 						Cid:         rootBlock.CidBase32(),
 						SizePayload: rootBlock.SizeCumulativePayload(),
 						SizeDag:     rootBlock.SizeCumulativeDag(),
 						Dup:         rootSeen,
 					})
+
+					dgr.mu.Unlock()
 				}
 
-				if cfg.emitters[emRootsJsonl] != nil {
+				if dgr.cfg.emitters[emRootsJsonl] != nil {
 					if _, err := fmt.Fprintf(
-						cfg.emitters[emRootsJsonl],
+						dgr.cfg.emitters[emRootsJsonl],
 						"{\"event\":   \"root\", \"payload\":%12d, \"stream\":%7d, \"cid\":\"%s\", \"wiresize\":%12d }\n",
 						rootBlock.SizeCumulativePayload(),
-						cfg.stats.totalStreams,
+						dgr.statSummary.Streams,
 						rootBlock.CidBase32(),
 						rootBlock.SizeCumulativeDag(),
 					); err != nil {
@@ -146,7 +174,7 @@ func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver cha
 		}
 
 		// we are in EOF-state: if we are not expecting multiparts - we are done
-		if !cfg.MultipartStream {
+		if !dgr.cfg.MultipartStream {
 			break
 		}
 	}
@@ -156,10 +184,9 @@ func ProcessReader(cfg *config, inputReader io.Reader, optionalRootsReceiver cha
 
 // We have too many special cases around zero-length streams: handle them
 // with a made up leaf
-func _injectZeroLeaf(cfg *config) {
-	appendLeaf(
-		cfg,
-		cfg.chainedLinkers[0].NewLeafBlock(block.DataSource{}),
+func (dgr *Dagger) injectZeroLeaf() {
+	dgr.appendLeaf(
+		dgr.chainedLinkers[0].NewLeafBlock(block.DataSource{}),
 		nil,
 	)
 }
@@ -170,7 +197,7 @@ func _injectZeroLeaf(cfg *config) {
 type recursiveSplitResult struct {
 	subSplits      <-chan *recursiveSplitResult
 	chunkBufRegion *qringbuf.Region
-	chunk          chunker.SplitResult
+	chunk          chunker.Chunk
 }
 
 type chunkingInconsistencyHandler func(
@@ -181,10 +208,10 @@ type chunkingInconsistencyHandler func(
 	errStr string,
 )
 
-func processStream(cfg *config, streamLimit int64) error {
+func (dgr *Dagger) processStream(streamLimit int64) error {
 
 	// begin reading and filling buffer
-	if err := cfg.qrb.StartFill(streamLimit); err != nil {
+	if err := dgr.qrb.StartFill(streamLimit); err != nil {
 		return err
 	}
 
@@ -200,12 +227,12 @@ func processStream(cfg *config, streamLimit int64) error {
 
 chunking error
 --------------
-MainBufSize:       %17s
-SubBufSize:        %17s
-ErrorAtSubBufPos:  %17s
-StreamOffset:      %17s
-SubBufOffset:      %17s
-ErrorOffset:       %17s
+MainRegionSize:      %17s
+SubRegionSize:       %17s
+ErrorAtSubRegionPos: %17s
+StreamOffset:        %17s
+SubBufOffset:        %17s
+ErrorOffset:         %17s
 chunker: #%d %T
 --------------
 %s%s`,
@@ -216,7 +243,7 @@ chunker: #%d %T
 			util.Commify64(wrOffset),
 			util.Commify64(wrOffset+int64(wrPos)),
 			chunkerIdx,
-			cfg.chainedChunkers[chunkerIdx],
+			dgr.chainedChunkers[chunkerIdx],
 			errStr,
 			"\n\n",
 		)
@@ -227,7 +254,7 @@ chunker: #%d %T
 
 		// next 2 lines evaluate processedInRound and availableForRound from *LAST* iteration
 		streamOffset += int64(processedFromReader)
-		workRegion, readErr := cfg.qrb.NextRegion(availableFromReader - processedFromReader)
+		workRegion, readErr := dgr.qrb.NextRegion(availableFromReader - processedFromReader)
 
 		if workRegion == nil || (readErr != nil && readErr != io.EOF) {
 			return readErr
@@ -236,9 +263,8 @@ chunker: #%d %T
 		availableFromReader = workRegion.Size()
 		processedFromReader = 0
 
-		rescursiveSplitResults := make(chan *recursiveSplitResult, subChunksQueueSizeLevel0)
-		go recursivelySplitBuffer(
-			cfg,
+		rescursiveSplitResults := make(chan *recursiveSplitResult, chunkQueueSizeTop)
+		go dgr.recursivelySplitBuffer(
 			// The entire reserved buffer to split recursively
 			// Guaranteed to be left intact until we call NextSlice
 			workRegion,
@@ -263,15 +289,15 @@ chunker: #%d %T
 				if !chanOpen {
 					break receiveChunks
 				}
-				processedFromReader += reassembleRecursiveResults(cfg, res)
+				processedFromReader += dgr.reassembleRecursiveResults(res)
 			}
 		}
 
-		cfg.stats.summary.Dag.Payload += int64(processedFromReader)
+		dgr.statSummary.Dag.Payload += int64(processedFromReader)
 	}
 }
 
-func reassembleRecursiveResults(cfg *config, result *recursiveSplitResult) int {
+func (dgr *Dagger) reassembleRecursiveResults(result *recursiveSplitResult) int {
 
 	if result.subSplits != nil {
 		var substreamSize int
@@ -280,18 +306,17 @@ func reassembleRecursiveResults(cfg *config, result *recursiveSplitResult) int {
 			if !channelOpen {
 				return substreamSize
 			}
-			substreamSize += reassembleRecursiveResults(cfg, subRes)
+			substreamSize += dgr.reassembleRecursiveResults(subRes)
 		}
 	}
 
 	result.chunkBufRegion.Reserve()
 
 	// FIXME - need to validate there are indeed no errors to check ( something with car writing...? )
-	appendLeaf(
-		cfg,
-		cfg.chainedLinkers[0].NewLeafBlock(block.DataSource{
-			SplitResult: result.chunk,
-			Content:     zcpstring.NewFromSlice(result.chunkBufRegion.Bytes()),
+	dgr.appendLeaf(
+		dgr.chainedLinkers[0].NewLeafBlock(block.DataSource{
+			Chunk:   result.chunk,
+			Content: zcpstring.NewFromSlice(result.chunkBufRegion.Bytes()),
 		}),
 		result.chunkBufRegion,
 	)
@@ -299,8 +324,7 @@ func reassembleRecursiveResults(cfg *config, result *recursiveSplitResult) int {
 	return result.chunk.Size
 }
 
-func recursivelySplitBuffer(
-	cfg *config,
+func (dgr *Dagger) recursivelySplitBuffer(
 	workRegion *qringbuf.Region,
 	workRegionStreamOffset int64,
 	moreDataIsComing bool,
@@ -308,63 +332,49 @@ func recursivelySplitBuffer(
 	recursiveResultsReturn chan<- *recursiveSplitResult,
 	errHandler chunkingInconsistencyHandler,
 ) {
-	defer close(recursiveResultsReturn)
-
-	var resultingChunks chan chunker.SplitResult
-	if chunkerIdx == 0 {
-		resultingChunks = make(chan chunker.SplitResult, subChunksQueueSizeLevel0)
-	} else {
-		resultingChunks = make(chan chunker.SplitResult, subChunksQueueSizeLevelN)
-	}
-
-	go cfg.chainedChunkers[chunkerIdx].Split(
-		workRegion.Bytes(),
-		moreDataIsComing,
-		resultingChunks,
-	)
 
 	var processedBytes int
-	for {
-		chunk, chanOpen := <-resultingChunks
-		if !chanOpen {
-			break
-		}
 
-		if chunk.Size <= 0 || chunk.Size > workRegion.Size()-processedBytes {
-			errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
-				fmt.Sprintf("returned invalid chunk with size %d", chunk.Size),
-			)
-			return
-		}
+	dgr.chainedChunkers[chunkerIdx].Split(
+		workRegion.Bytes(),
+		moreDataIsComing,
+		func(c chunker.Chunk) {
 
-		if len(cfg.chainedChunkers) > chunkerIdx+1 {
-			// we are not last in the chain - subchunk
-			subSplits := make(chan *recursiveSplitResult, subChunksQueueSizeLevelN)
-			go recursivelySplitBuffer(
-				cfg,
-				workRegion.SubRegion(
-					processedBytes,
-					chunk.Size,
-				),
-				workRegionStreamOffset+int64(processedBytes),
-				false, // no "more is coming": when we are sub-chunking we always provide *all* the data
-				chunkerIdx+1,
-				subSplits,
-				errHandler,
-			)
-			recursiveResultsReturn <- &recursiveSplitResult{subSplits: subSplits}
-		} else {
-			recursiveResultsReturn <- &recursiveSplitResult{
-				chunk: chunk,
-				chunkBufRegion: workRegion.SubRegion(
-					processedBytes,
-					chunk.Size,
-				),
+			if c.Size <= 0 || c.Size > workRegion.Size()-processedBytes {
+				errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
+					fmt.Sprintf("returned invalid chunk with size %d", c.Size),
+				)
+				return
 			}
-		}
 
-		processedBytes += chunk.Size
-	}
+			if len(dgr.chainedChunkers) > chunkerIdx+1 {
+				// we are not last in the chain - subchunk
+				subSplits := make(chan *recursiveSplitResult, chunkQueueSizeSubchunk)
+				go dgr.recursivelySplitBuffer(
+					workRegion.SubRegion(
+						processedBytes,
+						c.Size,
+					),
+					workRegionStreamOffset+int64(processedBytes),
+					false, // no "more is coming": when we are sub-chunking we always provide *all* the data
+					chunkerIdx+1,
+					subSplits,
+					errHandler,
+				)
+				recursiveResultsReturn <- &recursiveSplitResult{subSplits: subSplits}
+			} else {
+				recursiveResultsReturn <- &recursiveSplitResult{
+					chunk: c,
+					chunkBufRegion: workRegion.SubRegion(
+						processedBytes,
+						c.Size,
+					),
+				}
+			}
+
+			processedBytes += c.Size
+		},
+	)
 
 	if processedBytes > workRegion.Size() ||
 		(!moreDataIsComing && processedBytes != workRegion.Size()) {
@@ -379,15 +389,16 @@ func recursivelySplitBuffer(
 				util.Commify(workRegion.Size()),
 			),
 		)
-		return
 	}
+
+	close(recursiveResultsReturn)
 }
 
-func appendLeaf(cfg *config, hdr *block.Header, dr *qringbuf.Region) {
+func (dgr *Dagger) appendLeaf(hdr *block.Header, dr *qringbuf.Region) {
 
-	cfg.chainedLinkers[0].AppendBlock(hdr)
+	dgr.chainedLinkers[0].AppendBlock(hdr)
 
-	if cfg.emitChunks {
+	if dgr.cfg.emitChunks {
 		var miniHash string
 		if sk := seenKey(hdr); sk != nil {
 			miniHash = fmt.Sprintf("%x", *sk)
@@ -399,9 +410,9 @@ func appendLeaf(cfg *config, hdr *block.Header, dr *qringbuf.Region) {
 			size *= -1
 		}
 		if _, err := fmt.Fprintf(
-			cfg.emitters[emChunksJsonl],
+			dgr.cfg.emitters[emChunksJsonl],
 			"{\"event\":  \"chunk\",  \"offset\":%12d, \"length\":%7d, \"cid\":\"%s\", \"minihash\":\"%s\" }\n",
-			cfg.stats.curStreamOffset,
+			dgr.curStreamOffset,
 			size,
 			hdr.CidBase32(),
 			miniHash,
@@ -410,28 +421,27 @@ func appendLeaf(cfg *config, hdr *block.Header, dr *qringbuf.Region) {
 		}
 	}
 
-	cfg.stats.curStreamOffset += int64(hdr.SizeCumulativePayload())
+	dgr.curStreamOffset += int64(hdr.SizeCumulativePayload())
 
 	// The leaf block processing is entirely decoupled from the linker chain
 	// Linkers call the same processor on intermediate link blocks they produce
-	cfg.asyncWG.Add(1)
+	dgr.asyncWG.Add(1)
 	if hdr.IsSparse() {
-		go registerNewBlock(cfg, hdr, generatedBy{0, 1}, nil, dr)
+		go dgr.registerNewBlock(hdr, generatedBy{0, 1}, nil, dr)
 	} else {
-		go registerNewBlock(cfg, hdr, generatedBy{0, 0}, nil, dr)
+		go dgr.registerNewBlock(hdr, generatedBy{0, 0}, nil, dr)
 	}
 }
 
 // This function is called as "fire and forget" goroutines
 // It may only panic, no error handling
-func registerNewBlock(
-	cfg *config,
+func (dgr *Dagger) registerNewBlock(
 	hdr *block.Header,
 	gen generatedBy,
 	links []*block.Header,
 	dataRegion *qringbuf.Region,
 ) {
-	defer cfg.asyncWG.Done()
+	defer dgr.asyncWG.Done()
 
 	if constants.PerformSanityChecks {
 		if hdr == nil {
@@ -441,14 +451,14 @@ func registerNewBlock(
 		}
 	}
 
-	atomic.AddInt64(&cfg.stats.summary.Dag.Size, int64(hdr.SizeBlock()))
-	atomic.AddInt64(&cfg.stats.summary.Dag.Nodes, 1)
+	atomic.AddInt64(&dgr.statSummary.Dag.Size, int64(hdr.SizeBlock()))
+	atomic.AddInt64(&dgr.statSummary.Dag.Nodes, 1)
 
-	if cfg.stats.seenBlocks != nil {
+	if dgr.seenBlocks != nil {
 		if k := seenKey(hdr); k != nil {
-			cfg.stats.mu.Lock()
+			dgr.mu.Lock()
 
-			if s, exists := cfg.stats.seenBlocks[*k]; exists {
+			if s, exists := dgr.seenBlocks[*k]; exists {
 				s.seenAt[gen]++
 			} else {
 				var inblockDataSize int
@@ -462,16 +472,16 @@ func registerNewBlock(
 					seenAt:    seenTimesAt{gen: 1},
 				}
 
-				if cfg.uniqueBlockCallback != nil {
+				if dgr.uniqueBlockCallback != nil {
 					// Due to how we lock the stats above, we will effectively serialize the callbacks
 					// This is *exactly* what we want
-					s.blockPostProcessResult = cfg.uniqueBlockCallback(hdr)
+					s.blockPostProcessResult = dgr.uniqueBlockCallback(hdr)
 				}
 
-				cfg.stats.seenBlocks[*k] = s
+				dgr.seenBlocks[*k] = s
 			}
 
-			cfg.stats.mu.Unlock()
+			dgr.mu.Unlock()
 		}
 	}
 

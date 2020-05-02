@@ -11,8 +11,7 @@ type sparseRunChunker struct {
 
 func (c *sparseRunChunker) MinChunkSize() int { return c.size }
 
-func (c *sparseRunChunker) Split(buf []byte, moreDataNextInvocation bool, slices chan<- chunker.SplitResult) {
-	defer close(slices)
+func (c *sparseRunChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
 
 	/*
 		-			var sparseStartPos, sparseRunSize int

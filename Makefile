@@ -39,8 +39,11 @@ analyze-bound-checks:
 		$(addsuffix /...="--d=ssa/check_bce/debug=1",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
-show-latest-cpu-pprof:
+serve-latest-pprof-cpu:
 	go tool pprof -http=:9090 tmp/pprof/latest_cpu.prof
+
+serve-latest-pprof-heap:
+	go tool pprof -http=:9090 tmp/pprof/latest_heap.prof
 
 test: build-maint
 	# anything above 32 and we blow through > 256 open file handles
