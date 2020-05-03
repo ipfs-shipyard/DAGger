@@ -6,31 +6,43 @@ DAGGC_NOBOUNDCHECKS=-B -C
 DAGMOD=github.com/ipfs-shipyard/DAGger
 DAGMOD_EXTRA=github.com/ipfs/go-qringbuf
 
-build:
-	mkdir -p bin/
-	go build --trimpath \
-		"-ldflags=all=$(DAGLD_STRIP)" \
-		-o bin/ ./cmd/*
+NOSANCHECKS=-tags 'nosanchecks_DAGger nosanchecks_qringbuf'
 
-	go build --trimpath \
-		-tags nosanitychecks \
+build:
+	mkdir -p tmp/pprof
+	mkdir -p bin/
+
+	go build \
+		--trimpath "-ldflags=all=$(DAGLD_STRIP)" \
+		-o bin/stream-dagger ./cmd/stream-dagger
+
+	go build \
+		$(NOSANCHECKS) \
 		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
-		"-ldflags=all=$(DAGLD_STRIP)" \
+		--trimpath "-ldflags=all=$(DAGLD_STRIP)" \
 		-o bin/stream-dagger-nochecks ./cmd/stream-dagger
 
-	mkdir -p tmp/pprof
-	go build -tags profiling "-ldflags=-X $(DAGMOD)/internal/dagger/util.profileOutDir=$(shell pwd)/tmp/pprof" \
+	go build \
 		"-gcflags=all=-l" \
-		-o bin/stream-dagger-profiling ./cmd/stream-dagger
+		-tags profile "-ldflags=-X $(DAGMOD)/internal/dagger/util.profileOutDir=$(shell pwd)/tmp/pprof" \
+		-o bin/stream-dagger-writepprof ./cmd/stream-dagger
+
+	go build \
+		$(NOSANCHECKS) \
+		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
+		"-gcflags=all=-l" \
+		-tags profile "-ldflags=-X $(DAGMOD)/internal/dagger/util.profileOutDir=$(shell pwd)/tmp/pprof" \
+		-o bin/stream-dagger-writepprof-nochecks ./cmd/stream-dagger
 
 analyze-all:
 	go build \
 		$(addsuffix /...="-m -m",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
-analyze-all-nosanchecks:
+analyze-all-nochecks:
 	go build \
-		-tags nosanitychecks \
+		$(NOSANCHECKS) \
+		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
 		$(addsuffix /...="-m -m",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
@@ -42,8 +54,8 @@ analyze-bound-checks:
 serve-latest-pprof-cpu:
 	go tool pprof -http=:9090 tmp/pprof/latest_cpu.prof
 
-serve-latest-pprof-heap:
-	go tool pprof -http=:9090 tmp/pprof/latest_heap.prof
+serve-latest-pprof-allocs:
+	go tool pprof -http=:9090 -alloc_objects tmp/pprof/latest_allocs.prof
 
 test: build-maint
 	# anything above 32 and we blow through > 256 open file handles

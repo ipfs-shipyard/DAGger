@@ -332,49 +332,71 @@ func (dgr *Dagger) recursivelySplitBuffer(
 	recursiveResultsReturn chan<- *recursiveSplitResult,
 	errHandler chunkingInconsistencyHandler,
 ) {
+	defer close(recursiveResultsReturn)
 
 	var processedBytes int
 
-	dgr.chainedChunkers[chunkerIdx].Split(
-		workRegion.Bytes(),
-		moreDataIsComing,
-		func(c chunker.Chunk) {
+	// SANCHECK
+	// It is not clear whether it is better to give this as a callback to
+	// a chunker directly, INSTEAD of the separate goroutine we have below
+	chunkProcessor := func(c chunker.Chunk) {
+		if c.Size <= 0 || c.Size > workRegion.Size()-processedBytes {
+			errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
+				fmt.Sprintf("returned invalid chunk with size %d", c.Size),
+			)
+			return
+		}
 
-			if c.Size <= 0 || c.Size > workRegion.Size()-processedBytes {
-				errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
-					fmt.Sprintf("returned invalid chunk with size %d", c.Size),
-				)
-				return
+		if len(dgr.chainedChunkers) > chunkerIdx+1 {
+			// we are not last in the chain - subchunk
+			subSplits := make(chan *recursiveSplitResult, chunkQueueSizeSubchunk)
+			go dgr.recursivelySplitBuffer(
+				workRegion.SubRegion(
+					processedBytes,
+					c.Size,
+				),
+				workRegionStreamOffset+int64(processedBytes),
+				false, // no "more is coming": when we are sub-chunking we always provide *all* the data
+				chunkerIdx+1,
+				subSplits,
+				errHandler,
+			)
+			recursiveResultsReturn <- &recursiveSplitResult{subSplits: subSplits}
+		} else {
+			recursiveResultsReturn <- &recursiveSplitResult{
+				chunk: c,
+				chunkBufRegion: workRegion.SubRegion(
+					processedBytes,
+					c.Size,
+				),
 			}
+		}
 
-			if len(dgr.chainedChunkers) > chunkerIdx+1 {
-				// we are not last in the chain - subchunk
-				subSplits := make(chan *recursiveSplitResult, chunkQueueSizeSubchunk)
-				go dgr.recursivelySplitBuffer(
-					workRegion.SubRegion(
-						processedBytes,
-						c.Size,
-					),
-					workRegionStreamOffset+int64(processedBytes),
-					false, // no "more is coming": when we are sub-chunking we always provide *all* the data
-					chunkerIdx+1,
-					subSplits,
-					errHandler,
-				)
-				recursiveResultsReturn <- &recursiveSplitResult{subSplits: subSplits}
-			} else {
-				recursiveResultsReturn <- &recursiveSplitResult{
-					chunk: c,
-					chunkBufRegion: workRegion.SubRegion(
-						processedBytes,
-						c.Size,
-					),
-				}
-			}
+		processedBytes += c.Size
+	}
 
-			processedBytes += c.Size
-		},
-	)
+	chanSize := chunkQueueSizeSubchunk
+	if chunkerIdx == 0 {
+		chanSize = chunkQueueSizeTop
+	}
+	chunkRetChan := make(chan chunker.Chunk, chanSize)
+
+	go func() {
+		dgr.chainedChunkers[chunkerIdx].Split(
+			workRegion.Bytes(),
+			moreDataIsComing,
+			func(c chunker.Chunk) { chunkRetChan <- c },
+		)
+		close(chunkRetChan)
+	}()
+
+	for {
+		c, chanOpen := <-chunkRetChan
+		if !chanOpen {
+			break
+		}
+		chunkProcessor(c)
+	}
 
 	if processedBytes > workRegion.Size() ||
 		(!moreDataIsComing && processedBytes != workRegion.Size()) {
@@ -389,9 +411,8 @@ func (dgr *Dagger) recursivelySplitBuffer(
 				util.Commify(workRegion.Size()),
 			),
 		)
+		return
 	}
-
-	close(recursiveResultsReturn)
 }
 
 func (dgr *Dagger) appendLeaf(hdr *block.Header, dr *qringbuf.Region) {
@@ -495,7 +516,6 @@ func (dgr *Dagger) registerNewBlock(
 		dataRegion.Release()
 	}
 
-	// Once we processed a block in this function - we can dump all of its content too
-	// Helps with general memory pressure on large DAGs
+	// Once we processed a block in this function - dump all of its content too
 	hdr.EvictContent()
 }

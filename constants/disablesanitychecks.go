@@ -1,4 +1,4 @@
-// +build nosanitychecks
+// +build nosanchecks_DAGger
 
 package constants
 

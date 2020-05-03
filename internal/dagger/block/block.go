@@ -60,7 +60,7 @@ const (
 type Header struct {
 	// Everything in this struct needs to be "cacheable"
 	// That is no data that changes without a panic can be present
-	// ( e.g. "how many times was block seen in dag" is out )
+	// ( e.g. stuff like "how many times was block seen in dag" is out )
 	sizeBlock        int
 	sizeLinkSection  int
 	isInlined        bool
@@ -73,7 +73,8 @@ type Header struct {
 	content          *zcpstring.ZcpString
 }
 
-func (h *Header) PeekContent() (c *zcpstring.ZcpString) {
+func (h *Header) Content() (c *zcpstring.ZcpString) {
+	// read first, check second
 	c = h.content
 	if constants.PerformSanityChecks &&
 		atomic.LoadInt32(h.contentGone) != 0 {
@@ -81,14 +82,14 @@ func (h *Header) PeekContent() (c *zcpstring.ZcpString) {
 	}
 	return
 }
-func (h *Header) EvictContent() (c *zcpstring.ZcpString) {
-	c, h.content = h.content, nil
+func (h *Header) EvictContent() {
 	if constants.PerformSanityChecks &&
 		atomic.AddInt32(h.contentGone, 1) != 1 {
 		util.InternalPanicf("block content no longer available")
 	}
-	return
+	h.content = nil
 }
+
 func (h *Header) Cid() []byte {
 	<-h.cidReady
 
@@ -312,7 +313,7 @@ func MakerFromConfig(
 				hdr.cidReady = make(chan struct{})
 				asyncRateLimiter <- struct{}{}
 				go func() {
-					hdr.PeekContent().WriteTo(hasher)
+					hdr.Content().WriteTo(hasher)
 					hdr.cid = (hasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
 					<-asyncRateLimiter
 					close(hdr.cidReady)

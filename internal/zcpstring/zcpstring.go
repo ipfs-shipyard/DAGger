@@ -22,6 +22,8 @@ type ZcpString struct {
 	slices    [][]byte
 }
 
+func (z *ZcpString) Size() int { return z.size }
+
 func NewFromSlice(s []byte) *ZcpString {
 	return &ZcpString{
 		slices:    [][]byte{s},
@@ -29,7 +31,6 @@ func NewFromSlice(s []byte) *ZcpString {
 		growGuard: constants.PerformSanityChecks,
 	}
 }
-
 func NewWithSegmentCap(capOfSegmentContainer int) *ZcpString {
 	zcp := &ZcpString{
 		slices:    make([][]byte, 0, capOfSegmentContainer),
@@ -40,7 +41,6 @@ func NewWithSegmentCap(capOfSegmentContainer int) *ZcpString {
 	}
 	return zcp
 }
-func (z *ZcpString) Size() int { return z.size }
 
 func (z *ZcpString) AddSlice(in []byte) {
 	if constants.PerformSanityChecks && z.growGuard {
@@ -65,16 +65,16 @@ func (z *ZcpString) AddZcp(in *ZcpString) {
 }
 
 func (z *ZcpString) AppendTo(target []byte) []byte {
-	for _, s := range z.slices {
-		target = append(target, s...)
+	for i := range z.slices {
+		target = append(target, z.slices[i]...)
 	}
 	return target
 }
 func (z *ZcpString) WriteTo(w io.Writer) (written int64, err error) {
-	var len int
-	for _, s := range z.slices {
-		len, err = w.Write(s)
-		written += int64(len)
+	var n int
+	for i := range z.slices {
+		n, err = w.Write(z.slices[i])
+		written += int64(n)
 		if err != nil {
 			return
 		}

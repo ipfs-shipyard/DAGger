@@ -110,7 +110,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 			StatsEnabled: statsBlocks,
 
-			// RingBufferSize: int(2*constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
+			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
 			RingBufferSize: 24 * 1024 * 1024,
 
 			//SANCHECK: these numbers have not been validated

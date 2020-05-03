@@ -1,4 +1,4 @@
-// +build profiling
+// +build profile
 
 package util
 
@@ -28,7 +28,7 @@ func setupProfiling() (profilingStopper func()) {
 	var openHandles []*os.File
 
 	cpuProfFh := openProfHandle("cpu", pathPrefix, &openHandles)
-	heapProfFh := openProfHandle("heap", pathPrefix, &openHandles)
+	allocsProfFh := openProfHandle("allocs", pathPrefix, &openHandles)
 
 	runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
 	runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
@@ -41,15 +41,15 @@ func setupProfiling() (profilingStopper func()) {
 	}
 
 	// this function is a closer, no aborts on errors
-	profilingStopper = func() {
+	return func() {
 
 		pprof.StopCPUProfile()
 		runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
 		runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
 
-		if err := pprof.Lookup("heap").WriteTo(heapProfFh, 0); err != nil {
+		if err := pprof.Lookup("allocs").WriteTo(allocsProfFh, 0); err != nil {
 			log.Printf(
-				"Error writing out 'heap' profile: %s",
+				"Error writing out 'allocs' profile: %s",
 				err,
 			)
 		}
@@ -64,8 +64,6 @@ func setupProfiling() (profilingStopper func()) {
 			}
 		}
 	}
-
-	return profilingStopper
 }
 
 func openProfHandle(profName string, pathPrefix string, openHandles *[]*os.File) (fh *os.File) {

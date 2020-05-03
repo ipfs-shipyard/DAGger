@@ -3,8 +3,8 @@ github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym
 github.com/go-gl/glfw/v3.3/glfw v0.0.0-20200222043503-6f7a984d4dc4/go.mod h1:tQ2UAYgL5IevRw8kRxooKSPJfGvJ9fJQFa0TUsXzTg8=
 github.com/google/uuid v1.1.1 h1:Gkbcsh/GbpXz7lPftLA3P6TYMwjCLYm83jiFQZF/3gY=
 github.com/google/uuid v1.1.1/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/ipfs/go-qringbuf v0.0.0-20200502130520-e7dae312664e h1:U/R/vQyTGElQPWLQyRN3t2OBESU1Tuw5SYYNtw7BYdY=
-github.com/ipfs/go-qringbuf v0.0.0-20200502130520-e7dae312664e/go.mod h1:m7p3zBKIOU/K16/VAVR9hMR1ac0kR/mq02CK5lLNjxc=
+github.com/ipfs/go-qringbuf v0.0.0-20200503100415-34b4291cc14a h1:YaZfxMKY5VIaDZ+zJzQWI4QJX/uoUy7RgJUr8LLe9DI=
+github.com/ipfs/go-qringbuf v0.0.0-20200503100415-34b4291cc14a/go.mod h1:m7p3zBKIOU/K16/VAVR9hMR1ac0kR/mq02CK5lLNjxc=
 github.com/klauspost/compress v1.10.5 h1:7q6vHIqubShURwQz8cQK6yIe/xC3IF0Vm7TGfqjewrc=
 github.com/klauspost/compress v1.10.5/go.mod h1:aoV0uJVorq1K+umq18yTdKaF57EivdYsUV+/s2qKfXs=
 github.com/minio/blake2b-simd v0.0.0-20160723061019-3f5f724cb5b1 h1:lYpkrQH5ajf0OXOcUbGjvZxxijuBwbbmlSxLiuofa+g=

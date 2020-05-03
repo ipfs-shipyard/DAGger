@@ -238,7 +238,7 @@ func (dgr *Dagger) OutputSummary() {
 	writeTextOutf(
 		"\nProcessing took %0.2f seconds using %0.2f vCPU and %0.2f MiB peak memory"+
 			"\nPerforming %s system reads using %0.2f vCPU at about %0.2f MiB/s"+
-			"\nIngesting payload of:%15s bytes%s\n\n",
+			"\nIngesting payload of:%17s bytes%s\n\n",
 
 		float64(smr.SysStats.ElapsedNsecs)/
 			1000000000,
@@ -262,9 +262,9 @@ func (dgr *Dagger) OutputSummary() {
 		substreamsDesc,
 	)
 
-	if len(smr.Roots) > 0 {
+	if smr.Dag.Nodes > 0 {
 		writeTextOutf(
-			"Forming DAG covering:%15s bytes across %s nodes\n",
+			"Forming DAG covering:%17s bytes across %s nodes\n",
 			util.Commify64(smr.Dag.Size), util.Commify64(smr.Dag.Nodes),
 		)
 	}
@@ -276,14 +276,14 @@ func (dgr *Dagger) OutputSummary() {
 	descParts := make([]string, 0, 32)
 
 	descParts = append(descParts, fmt.Sprintf(
-		"Dataset deduped into:%15s bytes over %s unique leaf nodes\n",
+		"Dataset deduped into:%17s bytes over %s unique leaf nodes\n",
 		util.Commify64(leafUWeight), util.Commify64(leafUCount),
 	))
 
 	if len(smr.Layers) > 1 {
 		descParts = append(descParts, fmt.Sprintf(
-			"Linked as streams by:%15s bytes over %s unique DAG-PB nodes\n"+
-				"Taking a grand-total:%15s bytes, ",
+			"Linked as streams by:%17s bytes over %s unique DAG-PB nodes\n"+
+				"Taking a grand-total:%17s bytes, ",
 			util.Commify64(totalUWeight-leafUWeight-sparseUWeight), util.Commify64(totalUCount-leafUCount-sparseUCount),
 			util.Commify64(totalUWeight),
 		))

@@ -4,7 +4,7 @@ go 1.13
 
 require (
 	github.com/google/uuid v1.1.1 // indirect
-	github.com/ipfs/go-qringbuf v0.0.0-20200502130520-e7dae312664e
+	github.com/ipfs/go-qringbuf v0.0.0-20200503100415-34b4291cc14a
 	github.com/klauspost/compress v1.10.5
 	github.com/minio/blake2b-simd v0.0.0-20160723061019-3f5f724cb5b1
 	github.com/minio/sha256-simd v0.1.1

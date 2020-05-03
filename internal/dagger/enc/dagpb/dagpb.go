@@ -40,18 +40,18 @@ func UnixFSv1Leaf(ds block.DataSource, bm block.Maker, leafUnixFsType byte) *blo
 		)
 	}
 
-	viLen := enc.VarintSlice(uint64(ds.Size))
+	dataLen := enc.VarintSlice(uint64(ds.Size))
 
 	blockData := zcpstring.NewWithSegmentCap(9)
 	blockData.AddByte(pbHdrF1LD)
-	blockData.AddSlice(enc.VarintSlice(uint64(3 + 2*len(viLen) + ds.Size + 1)))
+	blockData.AddSlice(enc.VarintSlice(uint64(3 + 2*len(dataLen) + ds.Size + 1)))
 	blockData.AddByte(pbHdrF1VI)
 	blockData.AddByte(leafUnixFsType)
 	blockData.AddByte(pbHdrF2LD)
-	blockData.AddSlice(viLen)
+	blockData.AddSlice(dataLen)
 	blockData.AddZcp(ds.Content)
 	blockData.AddByte(pbHdrF3VI)
-	blockData.AddSlice(viLen)
+	blockData.AddSlice(dataLen)
 
 	return bm(
 		blockData,
@@ -83,20 +83,28 @@ func UnixFSv1LinkNode(
 		)
 	}
 
-	for _, blk := range blocks {
+	for i := range blocks {
 
-		cid := blk.Cid()
+		cid := blocks[i].Cid()
 		if legacyCIDv0Links &&
-			!blk.IsInlined() &&
-			blk.SizeCumulativePayload() != blk.SizeCumulativeDag() { // size inequality is a hack to quickly distinguish raw leaf blocks from everything else
+			!blocks[i].IsInlined() &&
+			blocks[i].SizeCumulativePayload() != blocks[i].SizeCumulativeDag() { // size inequality is a hack to quickly distinguish raw leaf blocks from everything else
 			cid = cid[2:]
 		}
 
 		cidLenVI := enc.VarintSlice(uint64(len(cid)))
-		dagSizeVI := enc.VarintSlice(blk.SizeCumulativeDag())
+		var dagSizeVI []byte
+		var frameLen uint64
+
+		if omitTsizeAndOffsets {
+			frameLen = uint64(1 + len(cidLenVI) + len(cid))
+		} else {
+			dagSizeVI = enc.VarintSlice(blocks[i].SizeCumulativeDag())
+			frameLen = uint64(1 + len(cidLenVI) + len(cid) + 3 + len(dagSizeVI))
+		}
 
 		linkBlock.AddByte(pbHdrF2LD)
-		linkBlock.AddSlice(enc.VarintSlice(uint64(1 + len(cidLenVI) + len(cid) + 3 + len(dagSizeVI))))
+		linkBlock.AddSlice(enc.VarintSlice(frameLen))
 
 		linkBlock.AddByte(pbHdrF1LD)
 		linkBlock.AddSlice(cidLenVI)
@@ -111,7 +119,7 @@ func UnixFSv1LinkNode(
 			linkBlock.AddSlice(dagSizeVI)
 
 			seekOffsets.AddByte(pbHdrF4VI)
-			seekOffsets.AddSlice(enc.VarintSlice(blk.SizeCumulativePayload()))
+			seekOffsets.AddSlice(enc.VarintSlice(blocks[i].SizeCumulativePayload()))
 		}
 
 		if linkBlock.Size() >= int(constants.HardMaxBlockSize) {
@@ -121,8 +129,8 @@ func UnixFSv1LinkNode(
 				util.Commify(int(constants.HardMaxBlockSize)),
 			)
 		}
-		totalPayload += blk.SizeCumulativePayload()
-		subDagSize += blk.SizeCumulativeDag()
+		totalPayload += blocks[i].SizeCumulativePayload()
+		subDagSize += blocks[i].SizeCumulativeDag()
 	}
 
 	// measure before we append the data part

@@ -51,7 +51,7 @@ func (l *linker) AppendBlock(hdr *block.Header) {
 
 func (l *linker) compactLayers(fullMergeRequested bool) {
 
-	for stackLayerIdx := 0; stackLayerIdx < len(l.stack); stackLayerIdx++ {
+	for stackLayerIdx := range l.stack {
 		curStack := &l.stack[stackLayerIdx] // shortcut
 
 		if len(*curStack) == 1 && len(l.stack) == stackLayerIdx+1 ||
