@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"sync/atomic"
 	"time"
 
@@ -19,8 +20,8 @@ import (
 
 // SANCHECK: not sure if any of these make sense, nor have I measured the cost
 const (
-	chunkQueueSizeTop      = 32
-	chunkQueueSizeSubchunk = 8
+	chunkQueueSizeTop      = 256
+	chunkQueueSizeSubchunk = 32
 )
 
 func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver chan<- *block.Header) error {
@@ -60,6 +61,23 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 
 		sys.ElapsedNsecs = time.Since(t0).Nanoseconds()
 		unix.Getrusage(unix.RUSAGE_SELF, &r1) // ignore errors
+
+		if dgr.asyncHasherBus != nil {
+			gr := runtime.NumGoroutine()
+
+			// signal the hashers to shut down
+			close(dgr.asyncHasherBus)
+
+			if constants.PerformSanityChecks {
+				// we will be checking for leaked goroutines - wait a bit for hashers to shut down
+				for {
+					time.Sleep(10 * time.Millisecond)
+					if runtime.NumGoroutine() <= gr-dgr.cfg.AsyncHashers {
+						break
+					}
+				}
+			}
+		}
 
 		sys.CpuUserNsecs = unix.TimevalToNsec(r1.Utime) - unix.TimevalToNsec(r0.Utime)
 		sys.CpuSysNsecs = unix.TimevalToNsec(r1.Stime) - unix.TimevalToNsec(r0.Stime)

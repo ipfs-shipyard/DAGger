@@ -106,16 +106,16 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		cfg: config{
 			GlobalMaxChunkSize: 1024 * 1024,
 			HashBits:           256,
-			AsyncHashers:       runtime.NumCPU() + runtime.NumCPU()/2,
+			AsyncHashers:       runtime.NumCPU() * 8, // SANCHECK yes, this is high: seems the simd version knows what to do...
 
 			StatsEnabled: statsBlocks,
 
 			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
-			RingBufferSize: 24 * 1024 * 1024,
+			RingBufferSize: 24 * 1024 * 1024, // SANCHECK low seems good somehow... fits in L3 maybe?
 
 			//SANCHECK: these numbers have not been validated
-			RingBufferMinRead:  128 * 1024,
-			RingBufferSectSize: 128 * 1024,
+			RingBufferMinRead:  256 * 1024,
+			RingBufferSectSize: 64 * 1024,
 
 			emittersStdOut:   []string{emRootsJsonl},
 			emittersStdErr:   []string{emStatsText},
@@ -215,7 +215,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		}
 
 		var errStr string
-		blockMaker, errStr = block.MakerFromConfig(
+		blockMaker, dgr.asyncHasherBus, errStr = block.MakerFromConfig(
 			cfg.hashAlg,
 			cfg.HashBits/8,
 			cfg.InlineMaxSize,

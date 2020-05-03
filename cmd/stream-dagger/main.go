@@ -40,26 +40,35 @@ func main() {
 		}
 	}
 
-	// func() wrapper for multiple defer triggers, before stat emission
+	// func() wrapper for multiple defer triggers
+	// Written this way to make profiling more straightforward
 	processErr := func() error {
+
+		if constants.PerformSanityChecks {
+			defer func() {
+				// when we get here we should have shut down every goroutine there is
+				expectRunning := 1
+				if runtime.NumGoroutine() > expectRunning {
+					log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
+						expectRunning,
+						runtime.NumGoroutine(),
+					)
+					p, _ := os.FindProcess(os.Getpid())
+					p.Signal(unix.SIGQUIT)
+				}
+
+				// needed to trigger the zcpstring overallocation guards
+				// unless we profile in which case we do it there
+				if util.ProfileStartStop == nil {
+					defer runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
+					defer runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
+				}
+			}()
+		}
+
+		// starts profiler, and schedules stop, as first order of business
 		if util.ProfileStartStop != nil {
 			defer util.ProfileStartStop()()
-		} else if constants.PerformSanityChecks {
-
-			// when we get here we should have shut down every goroutine there is
-			expectRunning := 1
-			if runtime.NumGoroutine() > expectRunning {
-				log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
-					expectRunning,
-					runtime.NumGoroutine(),
-				)
-				p, _ := os.FindProcess(os.Getpid())
-				p.Signal(unix.SIGQUIT)
-			}
-
-			// needed to trigger the zcpstring overallocation guards
-			defer runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
-			defer runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
 		}
 
 		return dgr.ProcessReader(

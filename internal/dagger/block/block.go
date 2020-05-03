@@ -158,17 +158,23 @@ func (h *Header) String() string {
 	return h.CidBase32()
 }
 
+type hashTask struct {
+	codecID uint
+	hdr     *Header
+}
+type AsyncHashBus chan<- hashTask
+
 func MakerFromConfig(
 	hashAlg string,
 	cidHashSize int,
 	inlineMaxSize int,
 	maxAsyncHashers int,
-) (maker Maker, errString string) {
+) (maker Maker, asyncHashQueue chan hashTask, errString string) {
 	var nativeHashSize int
 
 	hashopts, found := AvailableHashers[hashAlg]
 	if !found {
-		return nil, fmt.Sprintf(
+		return nil, nil, fmt.Sprintf(
 			"invalid hashing algorithm '%s'. Available hash algorithms are %s",
 			hashAlg,
 			util.AvailableMapKeys(AvailableHashers),
@@ -182,7 +188,7 @@ func MakerFromConfig(
 	}
 
 	if nativeHashSize < cidHashSize {
-		return nil, fmt.Sprintf(
+		return nil, nil, fmt.Sprintf(
 			"selected hash algorithm '%s' does not produce a digest satisfying the requested hash bits '%d'",
 			hashAlg,
 			cidHashSize*8,
@@ -190,7 +196,7 @@ func MakerFromConfig(
 	}
 
 	if maxAsyncHashers < 0 {
-		return nil, fmt.Sprintf(
+		return nil, nil, fmt.Sprintf(
 			"invalid negative value '%d' for maxAsyncHashers",
 			maxAsyncHashers,
 		)
@@ -211,9 +217,31 @@ func MakerFromConfig(
 	cidPreMadeChan := make(chan struct{})
 	close(cidPreMadeChan)
 
-	var asyncRateLimiter chan struct{}
-	if maxAsyncHashers > 0 {
-		asyncRateLimiter = make(chan struct{}, maxAsyncHashers)
+	var standaloneHasher hash.Hash
+	if hashopts.hasherMaker != nil {
+
+		if maxAsyncHashers == 0 {
+			standaloneHasher = hashopts.hasherMaker()
+
+		} else {
+			asyncHashQueue = make(chan hashTask, 8*maxAsyncHashers) // SANCHECK queue up to 8 times the available workers
+
+			for i := 0; i < maxAsyncHashers; i++ {
+				go func() {
+					hasher := hashopts.hasherMaker()
+					for {
+						task, chanOpen := <-asyncHashQueue
+						if !chanOpen {
+							return
+						}
+						hasher.Reset()
+						task.hdr.Content().WriteTo(hasher)
+						task.hdr.cid = (hasher.Sum(task.hdr.cid))[:codecs[task.codecID].hashedCidLength]
+						close(task.hdr.cidReady)
+					}
+				}()
+			}
+		}
 	}
 
 	maker = func(
@@ -304,25 +332,18 @@ func MakerFromConfig(
 				codecs[codecID].hashedCidPrefix...,
 			)
 
-			hasher := hashopts.hasherMaker()
-
-			if maxAsyncHashers == 0 {
-				blockContent.WriteTo(hasher)
-				hdr.cid = (hasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
+			if asyncHashQueue == nil {
+				standaloneHasher.Reset()
+				blockContent.WriteTo(standaloneHasher)
+				hdr.cid = (standaloneHasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
 			} else {
 				hdr.cidReady = make(chan struct{})
-				asyncRateLimiter <- struct{}{}
-				go func() {
-					hdr.Content().WriteTo(hasher)
-					hdr.cid = (hasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
-					<-asyncRateLimiter
-					close(hdr.cidReady)
-				}()
+				asyncHashQueue <- hashTask{codecID, hdr}
 			}
 		}
 
 		return hdr
 	}
 
-	return maker, ""
+	return
 }

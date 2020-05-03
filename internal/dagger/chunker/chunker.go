@@ -4,7 +4,7 @@ type Chunker interface {
 	MinChunkSize() (constantSmallestPossibleEmittedChunk int)
 	Split(
 		rawData []byte,
-		moreDataNextInvocation bool,
+		moreDataNextRound bool,
 		resultCallback func(Chunk),
 	)
 }

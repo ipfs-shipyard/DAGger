@@ -18,6 +18,7 @@ type Dagger struct {
 	qrb                 *qringbuf.QuantizedRingBuffer
 	uniqueBlockCallback func(hdr *block.Header) blockPostProcessResult
 	asyncWG             sync.WaitGroup
+	asyncHasherBus      block.AsyncHashBus
 	mu                  sync.Mutex
 	seenBlocks          seenBlocks
 	seenRoots           seenRoots
