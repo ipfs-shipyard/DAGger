@@ -106,7 +106,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		cfg: config{
 			GlobalMaxChunkSize: 1024 * 1024,
 			HashBits:           256,
-			AsyncHashers:       runtime.NumCPU() * 8, // SANCHECK yes, this is high: seems the simd version knows what to do...
+			AsyncHashers:       runtime.NumCPU() * 4, // SANCHECK yes, this is high: seems the simd version knows what to do...
 
 			StatsEnabled: statsBlocks,
 

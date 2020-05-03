@@ -81,7 +81,6 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 
 		sys.CpuUserNsecs = unix.TimevalToNsec(r1.Utime) - unix.TimevalToNsec(r0.Utime)
 		sys.CpuSysNsecs = unix.TimevalToNsec(r1.Stime) - unix.TimevalToNsec(r0.Stime)
-		sys.MaxRssBytes = r1.Maxrss
 		sys.MinFlt = r1.Minflt - r0.Minflt
 		sys.MajFlt = r1.Majflt - r0.Majflt
 		sys.BioRead = r1.Inblock - r0.Inblock
@@ -89,6 +88,12 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 		sys.Sigs = r1.Nsignals - r0.Nsignals
 		sys.CtxSwYield = r1.Nvcsw - r0.Nvcsw
 		sys.CtxSwForced = r1.Nivcsw - r0.Nivcsw
+
+		sys.MaxRssBytes = r1.Maxrss
+		if runtime.GOOS != "darwin" {
+			// anywhere but mac maxrss is actually KiB
+			sys.MaxRssBytes *= 1024
+		}
 	}()
 
 	unix.Getrusage(unix.RUSAGE_SELF, &r0) // ignore errors
