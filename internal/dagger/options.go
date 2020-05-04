@@ -24,7 +24,7 @@ import (
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/rabin"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/balanced"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/fixedoutdegree"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/trickle"
 )
 
@@ -34,9 +34,9 @@ var availableChunkers = map[string]chunker.Initializer{
 	"rabin":      rabin.NewChunker,
 }
 var availableLinkers = map[string]linker.Initializer{
-	"ipfs-balanced": balanced.NewLinker,
-	"ipfs-trickle":  trickle.NewLinker,
-	"none":          linker.NewNulLinker,
+	"ipfs-fixed-outdegree": fixedoutdegree.NewLinker,
+	"ipfs-trickle":         trickle.NewLinker,
+	"none":                 linker.NewNulLinker,
 }
 
 const (
@@ -73,6 +73,10 @@ type config struct {
 
 	emittersStdErr []string // Emitter spec: option/helptext in setupArgvParser
 	emittersStdOut []string // Emitter spec: option/helptext in setupArgvParser
+
+	// no-option-attached, parsing error accumulators
+	erroredChunkers []string
+	erroredLinkers  []string
 
 	// 34 bytes is the largest identity CID that fits in 63 chars (dns limit) of b-prefixed base32 encoding
 	InlineMaxSize      int `getopt:"--inline-max-size          Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
@@ -252,13 +256,15 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		}
 	}
 
+	var errorMessages []string
+
 	if cfg.requestedChunkers == "" {
 		argErrs = append(argErrs,
 			"You must specify at least one stream chunker via '--chunkers=algname1:opt1:opt2::algname2:...'. Available chunker names are: "+
 				util.AvailableMapKeys(availableChunkers),
 		)
-	} else if errorStrings := dgr.setupChunkerChain(); len(errorStrings) > 0 {
-		argErrs = append(argErrs, errorStrings...)
+	} else if errorMessages, cfg.erroredChunkers = dgr.setupChunkerChain(); len(errorMessages) > 0 {
+		argErrs = append(argErrs, errorMessages...)
 	}
 
 	if cfg.optSet.IsSet("linkers") && cfg.requestedLinkers == "" {
@@ -266,12 +272,11 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 			"When specified linker chain must be in the form '--linkers=algname1:opt1:opt2::algname2:...'. Available linker names are: "+
 				util.AvailableMapKeys(availableLinkers),
 		)
-	} else if errorStrings := dgr.setupLinkerChain(blockMaker); len(errorStrings) > 0 {
-		argErrs = append(argErrs, errorStrings...)
+	} else if errorMessages, cfg.erroredLinkers = dgr.setupLinkerChain(blockMaker); len(errorMessages) > 0 {
+		argErrs = append(argErrs, errorMessages...)
 	}
 
 	if len(argErrs) != 0 {
-
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
 		cfg.printUsage()
 
@@ -311,25 +316,41 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 func (cfg *config) printUsage() {
 	cfg.optSet.PrintUsage(argParseErrOut)
-	if cfg.HelpAll {
-		printPluginUsage(argParseErrOut)
+	if cfg.HelpAll || len(cfg.erroredChunkers) > 0 || len(cfg.erroredLinkers) > 0 {
+		printPluginUsage(
+			argParseErrOut,
+			cfg.erroredChunkers,
+			cfg.erroredLinkers,
+		)
 	} else {
 		fmt.Fprint(argParseErrOut, "\nTry --help-all for more info\n\n")
 	}
 }
 
-func printPluginUsage(out io.Writer) {
+func printPluginUsage(
+	out io.Writer,
+	listChunkers []string,
+	listLinkers []string,
+) {
 
-	chunkerNames := make([]string, 0, len(availableChunkers))
-	for name, initializer := range availableChunkers {
-		if initializer != nil {
-			chunkerNames = append(chunkerNames, name)
+	// if nothing was requested explicitly - list everything
+	if len(listChunkers) == 0 && len(listLinkers) == 0 {
+		for name, initializer := range availableChunkers {
+			if initializer != nil {
+				listChunkers = append(listChunkers, name)
+			}
+		}
+		for name, initializer := range availableLinkers {
+			if initializer != nil {
+				listLinkers = append(listLinkers, name)
+			}
 		}
 	}
-	if len(chunkerNames) != 0 {
+
+	if len(listChunkers) != 0 {
 		fmt.Fprint(out, "\n")
-		sort.Strings(chunkerNames)
-		for _, name := range chunkerNames {
+		sort.Strings(listChunkers)
+		for _, name := range listChunkers {
 			fmt.Fprintf(
 				out,
 				"[C]hunker '%s'\n",
@@ -344,16 +365,10 @@ func printPluginUsage(out io.Writer) {
 		}
 	}
 
-	linkerNames := make([]string, 0, len(availableLinkers))
-	for name, initializer := range availableLinkers {
-		if initializer != nil {
-			linkerNames = append(linkerNames, name)
-		}
-	}
-	if len(linkerNames) != 0 {
+	if len(listLinkers) != 0 {
 		fmt.Fprint(out, "\n")
-		sort.Strings(linkerNames)
-		for _, name := range linkerNames {
+		sort.Strings(listLinkers)
+		for _, name := range listLinkers {
 			fmt.Fprintf(
 				out,
 				"[L]inker '%s'\n",
@@ -460,7 +475,7 @@ func (cfg *config) parseEmitterSpecs() (argErrs []string) {
 	return argErrs
 }
 
-func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
+func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) {
 	commonCfg := chunker.CommonConfig{
 		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
 		InternalPanicf:     util.InternalPanicf,
@@ -490,6 +505,8 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 			chunkerArgs,
 			&commonCfg,
 		); len(initErrors) > 0 {
+
+			initFailFor = append(initFailFor, chunkerArgs[0])
 			for _, e := range initErrors {
 				argErrs = append(argErrs, fmt.Sprintf(
 					"Initialization of chunker '%s' failed: %s",
@@ -502,10 +519,10 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 		}
 	}
 
-	return argErrs
+	return argErrs, initFailFor
 }
 
-func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string) {
+func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailFor []string) {
 	commonCfg := linker.CommonConfig{
 		InternalPanicf:     util.InternalPanicf,
 		GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
@@ -561,6 +578,7 @@ func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string) {
 			&linkerCfg,
 		); len(initErrors) > 0 {
 
+			initFailFor = append(initFailFor, linkerArgs[0])
 			for _, e := range initErrors {
 				argErrs = append(argErrs, fmt.Sprintf(
 					"Initialization of linker '%s' failed: %s",
@@ -573,7 +591,7 @@ func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string) {
 		}
 	}
 
-	return argErrs
+	return argErrs, initFailFor
 }
 
 type compatIpfsArgs struct {
@@ -636,7 +654,7 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 
 		var linkerOpts []string
 
-		// either trickle or balanced, go-ipfs doesn't understand much else
+		// either trickle or fixed-outdegree, go-ipfs doesn't understand much else
 		if ipfsOpts.TrickleLinker {
 			linkerOpts = append(linkerOpts, "ipfs-trickle")
 			// mandatory defaults
@@ -644,10 +662,10 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 			linkerOpts = append(linkerOpts, "max-direct-leaves=174")
 			linkerOpts = append(linkerOpts, "max-sibling-subgroups=4")
 		} else {
-			linkerOpts = append(linkerOpts, "ipfs-balanced")
+			linkerOpts = append(linkerOpts, "ipfs-fixed-outdegree")
 			// mandatory defaults
 			linkerOpts = append(linkerOpts, "v0")
-			linkerOpts = append(linkerOpts, "max-children=174")
+			linkerOpts = append(linkerOpts, "max-outdegree=174")
 		}
 
 		if ipfsOpts.CidVersion != 1 {

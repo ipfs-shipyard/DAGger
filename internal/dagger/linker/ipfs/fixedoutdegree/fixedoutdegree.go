@@ -1,4 +1,4 @@
-package balanced
+package fixedoutdegree
 
 import (
 	"fmt"
@@ -13,7 +13,7 @@ import (
 )
 
 type config struct {
-	MaxChildrenPerNode    int  `getopt:"--max-children            Maximum children per node (IPFS default: 174)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
+	MaxOutdegree          int  `getopt:"--max-outdegree           Maximum outdegree (children) for a node (IPFS default: 174)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
 	LegacyDecoratedLeaves bool `getopt:"--unixfs-leaves           Generate leaves as full UnixFS file nodes"`
 	LegacyCIDv0Links      bool `getopt:"--cidv0                   Generate compat-mode CIDv0 links"`
 	NonstandardLeanLinks  bool `getopt:"--non-standard-lean-links Omit dag-size and offset information from all links. While IPFS likely will render the result, one voids all warranties"`
@@ -44,7 +44,7 @@ func (l *linker) AppendBlock(hdr *block.Header) {
 
 	// Compact every time we reach enough loose nodes on the leaf-layer
 	// Helps relieve memory pressure/consumption on very large DAGs
-	if len(l.stack[0]) >= l.MaxChildrenPerNode {
+	if len(l.stack[0]) >= l.MaxOutdegree {
 		l.compactLayers(false) // do not proceed beyond already-full nodes
 	}
 }
@@ -55,7 +55,7 @@ func (l *linker) compactLayers(fullMergeRequested bool) {
 		curStack := &l.stack[stackLayerIdx] // shortcut
 
 		if len(*curStack) == 1 && len(l.stack) == stackLayerIdx+1 ||
-			!fullMergeRequested && len(*curStack) < l.MaxChildrenPerNode {
+			!fullMergeRequested && len(*curStack) < l.MaxOutdegree {
 			break
 		}
 
@@ -65,10 +65,10 @@ func (l *linker) compactLayers(fullMergeRequested bool) {
 		}
 
 		var curIdx int
-		for len(*curStack)-curIdx >= l.MaxChildrenPerNode ||
+		for len(*curStack)-curIdx >= l.MaxOutdegree ||
 			fullMergeRequested && curIdx < len(*curStack) {
 
-			cutoffIdx := curIdx + l.MaxChildrenPerNode
+			cutoffIdx := curIdx + l.MaxOutdegree
 			if cutoffIdx > len(*curStack) {
 				cutoffIdx = len(*curStack)
 			}
@@ -116,9 +116,9 @@ func NewLinker(args []string, commonCfg *linkerbase.CommonConfig) (_ linkerbase.
 
 	if args == nil {
 		return nil, util.SubHelp(
-			"Produces a well balanced DAG with an equal amount of children per node.\n"+
+			"Produces a DAG with every node having a fixed outdegree (amount of children)\n"+
 				"First argument must be a version specifier 'vN'. Currently only supports\n"+
-				"'v0', generating go-ipfs-standard, inefficient, 'Tsize'-full linknodes.",
+				"'v0' generating go-ipfs-standard, inefficient, 'Tsize'-full linknodes.",
 			optSet,
 		)
 	}
@@ -163,11 +163,11 @@ func NewLinker(args []string, commonCfg *linkerbase.CommonConfig) (_ linkerbase.
 		)
 	}
 
-	if l.MaxChildrenPerNode <= 0 {
-		initErrs = append(
-			initErrs,
-			"positive value for 'max-children' must be specified",
-		)
+	if l.MaxOutdegree < 2 {
+		initErrs = append(initErrs, fmt.Sprintf(
+			"value of 'max-outdegree' %d is out of range [2:...]",
+			l.MaxOutdegree,
+		))
 	}
 
 	if l.LegacyDecoratedLeaves {

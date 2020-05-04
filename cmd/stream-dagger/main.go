@@ -46,15 +46,18 @@ func main() {
 
 		if constants.PerformSanityChecks {
 			defer func() {
-				// when we get here we should have shut down every goroutine there is
-				expectRunning := 1
-				if runtime.NumGoroutine() > expectRunning {
-					log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
-						expectRunning,
-						runtime.NumGoroutine(),
-					)
-					p, _ := os.FindProcess(os.Getpid())
-					p.Signal(unix.SIGQUIT)
+
+				if util.CheckGoroutineCount {
+					// when we get here we should have shut down every goroutine there is
+					expectRunning := 1
+					if runtime.NumGoroutine() > expectRunning {
+						log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
+							expectRunning,
+							runtime.NumGoroutine(),
+						)
+						p, _ := os.FindProcess(os.Getpid())
+						p.Signal(unix.SIGQUIT)
+					}
 				}
 
 				// needed to trigger the zcpstring overallocation guards

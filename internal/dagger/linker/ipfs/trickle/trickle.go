@@ -188,10 +188,10 @@ func NewLinker(args []string, commonCfg *linkerbase.CommonConfig) (_ linkerbase.
 
 	if args == nil {
 		return nil, util.SubHelp(
-			"Produces a \"side-balanced\" DAG optimized for streaming. Leaf nodes further\n"+
-				"away from the stream start are arranged in nodes at increasing \"depth\",\n"+
-				"further away from the root. The rough \"placement group\" for a particular\n"+
-				"node LeafIndex away from the stream start can be derived numerically via:\n"+
+			"Produces a \"side-balanced\" DAG optimized for streaming. Data blocks further\n"+
+				"away from the stream start are arranged in nodes at increasing depth away\n"+
+				"from the root. The rough \"placement group\" for a particular node LeafIndex\n"+
+				"away from the stream start can be derived numerically via:\n"+
 				"int( log( LeafIndex / MaxDirectLeaves ) / log( 1 + MaxSiblingSubgroups ) )\n"+
 				"See the example program in trickle.go for more info\n"+
 				"First argument must be a version specifier 'vN'. Currently only supports\n"+
@@ -240,17 +240,18 @@ func NewLinker(args []string, commonCfg *linkerbase.CommonConfig) (_ linkerbase.
 		)
 	}
 
-	if l.MaxDirectLeaves <= 0 {
-		initErrs = append(
-			initErrs,
-			"positive value for 'max-direct-leaves' must be specified",
-		)
+	if l.MaxDirectLeaves < 1 {
+		initErrs = append(initErrs, fmt.Sprintf(
+			"value of 'max-direct-leaves' %d is out of range [1:...]",
+			l.MaxDirectLeaves,
+		))
 	}
-	if l.MaxSiblingSubgroups <= 0 {
-		initErrs = append(
-			initErrs,
-			"positive value for 'max-sibling-subgroups' must be specified",
-		)
+
+	if l.MaxSiblingSubgroups < 1 {
+		initErrs = append(initErrs, fmt.Sprintf(
+			"value of 'max-sibling-subgroups' %d is out of range [1:...]",
+			l.MaxSiblingSubgroups,
+		))
 	}
 
 	if l.LegacyDecoratedLeaves {

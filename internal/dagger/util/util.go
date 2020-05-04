@@ -23,6 +23,8 @@ var InternalPanicf = func(format string, args ...interface{}) {
 	log.Panic(format)
 }
 
+var CheckGoroutineCount bool
+
 var ProfileStartStop func() func()
 
 // FileHandleOptimizations is populated by individual OS-specific init()s

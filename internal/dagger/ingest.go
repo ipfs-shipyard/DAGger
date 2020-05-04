@@ -63,7 +63,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 		unix.Getrusage(unix.RUSAGE_SELF, &r1) // ignore errors
 
 		if dgr.asyncHasherBus != nil {
-			gr := runtime.NumGoroutine()
+			wantCount := runtime.NumGoroutine() - dgr.cfg.AsyncHashers
 
 			// signal the hashers to shut down
 			close(dgr.asyncHasherBus)
@@ -71,8 +71,8 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 			if constants.PerformSanityChecks {
 				// we will be checking for leaked goroutines - wait a bit for hashers to shut down
 				for {
-					time.Sleep(10 * time.Millisecond)
-					if runtime.NumGoroutine() <= gr-dgr.cfg.AsyncHashers {
+					time.Sleep(2 * time.Millisecond)
+					if runtime.NumGoroutine() <= wantCount {
 						break
 					}
 				}
