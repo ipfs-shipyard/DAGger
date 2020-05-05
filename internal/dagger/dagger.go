@@ -16,7 +16,7 @@ type Dagger struct {
 	chainedChunkers     []chunker.Chunker
 	chainedLinkers      []linker.Linker
 	qrb                 *qringbuf.QuantizedRingBuffer
-	uniqueBlockCallback func(hdr *block.Header) blockPostProcessResult
+	uniqueBlockCallback func(hdr *block.Header) *blockPostProcessResult
 	asyncWG             sync.WaitGroup
 	asyncHasherBus      block.AsyncHashBus
 	mu                  sync.Mutex

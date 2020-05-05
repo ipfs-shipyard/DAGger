@@ -91,7 +91,8 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 
 		sys.MaxRssBytes = r1.Maxrss
 		if runtime.GOOS != "darwin" {
-			// anywhere but mac maxrss is actually KiB
+			// anywhere but mac maxrss is actually KiB, because fuck standards
+			// https://lists.apple.com/archives/darwin-kernel/2009/Mar/msg00005.html
 			sys.MaxRssBytes *= 1024
 		}
 	}()
@@ -184,10 +185,10 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 				if dgr.cfg.emitters[emRootsJsonl] != nil {
 					if _, err := fmt.Fprintf(
 						dgr.cfg.emitters[emRootsJsonl],
-						"{\"event\":   \"root\", \"payload\":%12d, \"stream\":%7d, \"cid\":\"%s\", \"wiresize\":%12d }\n",
+						"{\"event\":   \"root\", \"payload\":%12d, \"stream\":%7d, %-67s, \"wiresize\":%12d }\n",
 						rootBlock.SizeCumulativePayload(),
 						dgr.statSummary.Streams,
-						rootBlock.CidBase32(),
+						fmt.Sprintf(`"cid":"%s"`, rootBlock.CidBase32()),
 						rootBlock.SizeCumulativeDag(),
 					); err != nil {
 						log.Fatalf("Emitting '%s' failed: %s", emRootsJsonl, err)
@@ -238,6 +239,7 @@ func (dgr *Dagger) processStream(streamLimit int64) error {
 		return err
 	}
 
+	var streamEndInView bool
 	var availableFromReader int
 	var streamOffset int64
 
@@ -250,18 +252,22 @@ func (dgr *Dagger) processStream(streamLimit int64) error {
 
 chunking error
 --------------
+StreamEndInView:     %17t
 MainRegionSize:      %17s
 SubRegionSize:       %17s
 ErrorAtSubRegionPos: %17s
+SubRegionRemaining:  %17s
 StreamOffset:        %17s
 SubBufOffset:        %17s
 ErrorOffset:         %17s
 chunker: #%d %T
 --------------
-%s%s`,
+chunking error: %s%s`,
+			streamEndInView,
 			util.Commify(availableFromReader),
 			util.Commify(wrSize),
 			util.Commify(wrPos),
+			util.Commify(wrSize-wrPos),
 			util.Commify64(streamOffset),
 			util.Commify64(wrOffset),
 			util.Commify64(wrOffset+int64(wrPos)),
@@ -285,6 +291,7 @@ chunker: #%d %T
 
 		availableFromReader = workRegion.Size()
 		processedFromReader = 0
+		streamEndInView = (readErr == io.EOF)
 
 		rescursiveSplitResults := make(chan *recursiveSplitResult, chunkQueueSizeTop)
 		go dgr.recursivelySplitBuffer(
@@ -293,8 +300,8 @@ chunker: #%d %T
 			workRegion,
 			// Where we are (for error reporting)
 			streamOffset,
-			// We need to tell the top chunker that potentially more is coming, so that the entire chain won't repeat work
-			(readErr == nil),
+			// We need to tell the top chunker when nothing else is coming, to prevent the entire chain repeating work otherwise
+			streamEndInView,
 			// Index of top chunker
 			0,
 			// the channel for the chunking results
@@ -350,7 +357,7 @@ func (dgr *Dagger) reassembleRecursiveResults(result *recursiveSplitResult) int 
 func (dgr *Dagger) recursivelySplitBuffer(
 	workRegion *qringbuf.Region,
 	workRegionStreamOffset int64,
-	moreDataIsComing bool,
+	useEntireBuffer bool,
 	chunkerIdx int,
 	recursiveResultsReturn chan<- *recursiveSplitResult,
 	errHandler chunkingInconsistencyHandler,
@@ -361,13 +368,15 @@ func (dgr *Dagger) recursivelySplitBuffer(
 
 	// SANCHECK
 	// It is not clear whether it is better to give this as a callback to
-	// a chunker directly, INSTEAD of the separate goroutine we have below
-	chunkProcessor := func(c chunker.Chunk) {
-		if c.Size <= 0 || c.Size > workRegion.Size()-processedBytes {
+	// a chunker directly, INSTEAD of the separate goroutine/channel we have below
+	var chunkProcessor chunker.SplitResultCallback
+	chunkProcessor = func(c chunker.Chunk) error {
+		if c.Size <= 0 ||
+			c.Size > workRegion.Size()-processedBytes {
 			errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
-				fmt.Sprintf("returned invalid chunk with size %d", c.Size),
+				fmt.Sprintf("returned invalid chunk size %s", util.Commify(c.Size)),
 			)
-			return
+			return nil
 		}
 
 		if len(dgr.chainedChunkers) > chunkerIdx+1 {
@@ -379,7 +388,7 @@ func (dgr *Dagger) recursivelySplitBuffer(
 					c.Size,
 				),
 				workRegionStreamOffset+int64(processedBytes),
-				false, // no "more is coming": when we are sub-chunking we always provide *all* the data
+				true, // subchunkers always "use entire buffer" by definition
 				chunkerIdx+1,
 				subSplits,
 				errHandler,
@@ -396,6 +405,7 @@ func (dgr *Dagger) recursivelySplitBuffer(
 		}
 
 		processedBytes += c.Size
+		return nil
 	}
 
 	chanSize := chunkQueueSizeSubchunk
@@ -407,8 +417,8 @@ func (dgr *Dagger) recursivelySplitBuffer(
 	go func() {
 		dgr.chainedChunkers[chunkerIdx].Split(
 			workRegion.Bytes(),
-			moreDataIsComing,
-			func(c chunker.Chunk) { chunkRetChan <- c },
+			useEntireBuffer,
+			func(c chunker.Chunk) error { chunkRetChan <- c; return nil },
 		)
 		close(chunkRetChan)
 	}()
@@ -422,7 +432,7 @@ func (dgr *Dagger) recursivelySplitBuffer(
 	}
 
 	if processedBytes > workRegion.Size() ||
-		(!moreDataIsComing && processedBytes != workRegion.Size()) {
+		(useEntireBuffer && processedBytes != workRegion.Size()) {
 		errHandler(
 			chunkerIdx,
 			workRegionStreamOffset,
@@ -443,9 +453,9 @@ func (dgr *Dagger) appendLeaf(hdr *block.Header, dr *qringbuf.Region) {
 	dgr.chainedLinkers[0].AppendBlock(hdr)
 
 	if dgr.cfg.emitChunks {
-		var miniHash string
+		miniHash := " "
 		if sk := seenKey(hdr); sk != nil {
-			miniHash = fmt.Sprintf("%x", *sk)
+			miniHash = fmt.Sprintf(`, "minihash":"%x"`, *sk)
 		}
 
 		// this is a leaf - the total payload is the block data itself
@@ -455,10 +465,10 @@ func (dgr *Dagger) appendLeaf(hdr *block.Header, dr *qringbuf.Region) {
 		}
 		if _, err := fmt.Fprintf(
 			dgr.cfg.emitters[emChunksJsonl],
-			"{\"event\":  \"chunk\",  \"offset\":%12d, \"length\":%7d, \"cid\":\"%s\", \"minihash\":\"%s\" }\n",
+			"{\"event\":  \"chunk\",  \"offset\":%12d, \"length\":%7d, %-67s%s }\n",
 			dgr.curStreamOffset,
 			size,
-			hdr.CidBase32(),
+			fmt.Sprintf(`"cid":"%s"`, hdr.CidBase32()),
 			miniHash,
 		); err != nil {
 			log.Fatalf("Emitting '%s' failed: %s", emChunksJsonl, err)

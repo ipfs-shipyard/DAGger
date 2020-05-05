@@ -1,99 +1,124 @@
-package sparserun
+package padfinder
 
 import (
+	"fmt"
+	"regexp"
+
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
+	getopt "github.com/pborman/getopt/v2"
+	"github.com/pborman/options"
 )
 
-type sparseRunChunker struct {
-	size int
+type config struct {
+	Re2Longest string `getopt:"--re2-longest Stuff"`
 }
 
-func (c *sparseRunChunker) MinChunkSize() int { return c.size }
-
-func (c *sparseRunChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
-
-	/*
-		-			var sparseStartPos, sparseRunSize int
-		-
-		-			// sparseness-search takes precedence when requested
-		-			if findSparseRuns &&
-		-				cfg.rb.Buffered() >= cfg.SparseRunMinSize {
-		-
-		-				sparseSearchSize := cfg.rb.Buffered()
-		-				if sparseSearchSize > 2*cfg.MaxChunkSize {
-		-					sparseSearchSize = 2 * cfg.MaxChunkSize
-		-				}
-		-
-		-				firstImpossiblePos := sparseSearchSize - cfg.SparseRunMinSize
-		-				sparseSearchBuf := cfg.rb.Peek(sparseSearchSize)
-		-
-		-				for bufPos := 0; bufPos < firstImpossiblePos && sparseRunSize < cfg.SparseRunMinSize; bufPos++ {
-		-
-		-					if sparseSearchBuf[bufPos] != 0 {
-		-						// boyer-moore-ish-like long jump
-		-						// FIXME - this can be done even more efficient... I think
-		-						if sparseSearchBuf[bufPos+cfg.SparseRunMinSize] != 0 {
-		-							bufPos += cfg.SparseRunMinSize - 1
-		-						}
-		-						sparseStartPos = bufPos + 1
-		-					} else if sparseSearchBuf[sparseStartPos] != sparseSearchBuf[bufPos] {
-		-						sparseStartPos = bufPos
-		-					}
-		-
-		-					sparseRunSize = bufPos - sparseStartPos + 1
-		-				}
-		-
-		-				// we found something - go forward as much as we can
-		-				if sparseRunSize >= cfg.SparseRunMinSize {
-		-					for (sparseRunSize < cfg.MaxChunkSize) &&
-		-						(sparseStartPos+sparseRunSize < sparseSearchSize) &&
-		-						(sparseSearchBuf[sparseStartPos+sparseRunSize-1] == sparseSearchBuf[sparseStartPos+sparseRunSize]) {
-		-						sparseRunSize++
-		-					}
-		-				}
-		-			}
-
-	*/
-
+type padfinderPreChunker struct {
+	maxChunkSize int
+	re2          *regexp.Regexp
+	config
 }
 
-func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, initErrs []string) {
+// anything goes in this round
+func (c *padfinderPreChunker) MinChunkSize() int { return 0 }
+
+func (c *padfinderPreChunker) Split(
+	buf []byte,
+	useEntireBuffer bool,
+	cb chunker.SplitResultCallback,
+) (err error) {
+
+	return nil
+}
+
+/*
+	-			var sparseStartPos, sparseRunSize int
+	-
+	-			// sparseness-search takes precedence when requested
+	-			if findSparseRuns &&
+	-				cfg.rb.Buffered() >= cfg.SparseRunMinSize {
+	-
+	-				sparseSearchSize := cfg.rb.Buffered()
+	-				if sparseSearchSize > 2*cfg.MaxChunkSize {
+	-					sparseSearchSize = 2 * cfg.MaxChunkSize
+	-				}
+	-
+	-				firstImpossiblePos := sparseSearchSize - cfg.SparseRunMinSize
+	-				sparseSearchBuf := cfg.rb.Peek(sparseSearchSize)
+	-
+	-				for bufPos := 0; bufPos < firstImpossiblePos && sparseRunSize < cfg.SparseRunMinSize; bufPos++ {
+	-
+	-					if sparseSearchBuf[bufPos] != 0 {
+	-						// boyer-moore-ish-like long jump
+	-						// FIXME - this can be done even more efficient... I think
+	-						if sparseSearchBuf[bufPos+cfg.SparseRunMinSize] != 0 {
+	-							bufPos += cfg.SparseRunMinSize - 1
+	-						}
+	-						sparseStartPos = bufPos + 1
+	-					} else if sparseSearchBuf[sparseStartPos] != sparseSearchBuf[bufPos] {
+	-						sparseStartPos = bufPos
+	-					}
+	-
+	-					sparseRunSize = bufPos - sparseStartPos + 1
+	-				}
+	-
+	-				// we found something - go forward as much as we can
+	-				if sparseRunSize >= cfg.SparseRunMinSize {
+	-					for (sparseRunSize < cfg.MaxChunkSize) &&
+	-						(sparseStartPos+sparseRunSize < sparseSearchSize) &&
+	-						(sparseSearchBuf[sparseStartPos+sparseRunSize-1] == sparseSearchBuf[sparseStartPos+sparseRunSize]) {
+	-						sparseRunSize++
+	-					}
+	-				}
+	-			}
+
+*/
+
+func NewChunker(args []string, dgrCfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
+
+	c := padfinderPreChunker{
+		maxChunkSize: dgrCfg.GlobalMaxChunkSize,
+	}
+
+	optSet := getopt.New()
+	if err := options.RegisterSet("", &c.config, optSet); err != nil {
+		// A panic as this should not be possible
+		dgrCfg.InternalPanicf(
+			"option set registration failed: %s",
+			err,
+		)
+	}
 
 	// on nil-args the "error" is the help text to be incorporated into
 	// the larger help display
 	if args == nil {
 		return nil, util.SubHelp(
-			"Splits buffer into equally sized chunks. Requires a single parameter: the\n"+
-				"size of each chunk in bytes (IPFS default: 262144)",
-			nil,
+			"PAD FIXME",
+			optSet,
 		)
 	}
 
-	c := sparseRunChunker{}
+	// bail early if getopt fails
+	if err := optSet.Getopt(args, nil); err != nil {
+		return nil, []string{err.Error()}
+	}
 
-	// if len(args) != 2 {
-	// 	initErrs = append(initErrs, "chunker requires an integer argument, the size of each chunk in bytes")
-	// } else {
-	// 	sizearg, err := strconv.ParseUint(
-	// 		args[1][2:], // stripping off '--'
-	// 		10,
-	// 		25, // 25bits == 32 * 1024 * 1024 == 32MiB
-	// 	)
-	// 	if err != nil {
-	// 		initErrs = append(initErrs, fmt.Sprintf("argument parse failed: %s", err))
-	// 	} else {
-	// 		c.size = int(sizearg)
-	// 	}
-	// }
-
-	// if c.size > cfg.GlobalMaxChunkSize {
-	// 	initErrs = append(initErrs, fmt.Sprintf(
-	// 		"provided chunk size '%s' exceeds specified maximum payload size '%s",
-	// 		util.Commify(c.size),
-	// 		util.Commify(cfg.GlobalMaxChunkSize),
-	// 	))
-	// }
+	if c.Re2Longest == "" {
+		// FIXME - some day support more options but this one
+		return nil, []string{"one of the available match options must be used"}
+	} else {
+		var err error
+		if c.re2, err = regexp.Compile(c.Re2Longest); err != nil {
+			initErrs = append(initErrs, fmt.Sprintf(
+				"compilation of\n%s\n\tfailed: %s",
+				c.Re2Longest,
+				err,
+			))
+		} else {
+			c.re2.Longest()
+		}
+	}
 
 	return &c, initErrs
 }

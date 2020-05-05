@@ -122,8 +122,8 @@ type Maker func(
 ) *Header
 
 type DataSource struct {
-	chunker.Chunk
-	Content *zcpstring.ZcpString
+	chunker.Chunk // critically *NOT* a reference, so that DataSource{} is usable on its own
+	Content       *zcpstring.ZcpString
 }
 
 func RawDataLeaf(ds DataSource, bm Maker) *Header {

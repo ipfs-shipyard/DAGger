@@ -14,20 +14,28 @@ type fixedSizeChunker struct {
 
 func (c *fixedSizeChunker) MinChunkSize() int { return c.size }
 
-func (c *fixedSizeChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
+func (c *fixedSizeChunker) Split(
+	buf []byte,
+	useEntireBuffer bool,
+	cb chunker.SplitResultCallback,
+) (err error) {
 	curIdx := c.size
 
 	for curIdx < len(buf) {
-		cb(chunker.Chunk{Size: c.size})
+		err = cb(chunker.Chunk{Size: c.size})
+		if err != nil {
+			return
+		}
 		curIdx += c.size
 	}
 
-	if curIdx-c.size < len(buf) && !moreDataNextInvocation {
-		cb(chunker.Chunk{Size: len(buf) - (curIdx - c.size)})
+	if curIdx-c.size < len(buf) && useEntireBuffer {
+		err = cb(chunker.Chunk{Size: len(buf) - (curIdx - c.size)})
 	}
+	return
 }
 
-func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, initErrs []string) {
+func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
 
 	// on nil-args the "error" is the help text to be incorporated into
 	// the larger help display

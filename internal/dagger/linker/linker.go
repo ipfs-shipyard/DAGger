@@ -12,7 +12,9 @@ type Linker interface {
 	DeriveRoot() (rootBlockAfterReducingAndDestroyingLinkerState *block.Header)
 }
 
-type CommonConfig struct {
+type DaggerConfig struct {
+	IndexInChain         int
+	LastChainIndex       int
 	GlobalMaxBlockSize   int
 	HasherBits           int
 	HasherName           string
@@ -30,13 +32,13 @@ type NewLinkBlockCallback func(
 
 type Initializer func(
 	linkerCLISubArgs []string,
-	cfg *CommonConfig,
+	cfg *DaggerConfig,
 ) (instance Linker, initErrorStrings []string)
 
 //
 // Implement the "none" linker here directly, without a separate package
 //
-type nulLinker struct{ *CommonConfig }
+type nulLinker struct{ *DaggerConfig }
 
 func (l *nulLinker) NewLeafBlock(ds block.DataSource) *block.Header {
 	return block.RawDataLeaf(ds, l.BlockMaker)
@@ -44,7 +46,7 @@ func (l *nulLinker) NewLeafBlock(ds block.DataSource) *block.Header {
 func (l *nulLinker) NewLinkBlock([]*block.Header) *block.Header { return nil }
 func (l *nulLinker) AppendBlock(*block.Header)                  { return }
 func (l *nulLinker) DeriveRoot() *block.Header                  { return nil }
-func NewNulLinker(args []string, commonCfg *CommonConfig) (_ Linker, initErrs []string) {
+func NewNulLinker(args []string, dgrCfg *DaggerConfig) (_ Linker, initErrs []string) {
 	if args == nil {
 		return nil, util.SubHelp(
 			"Does not form a DAG, nor emits a root CID. Simply gathers all chunked data\n"+
@@ -56,9 +58,9 @@ func NewNulLinker(args []string, commonCfg *CommonConfig) (_ Linker, initErrs []
 	if len(args) > 1 {
 		initErrs = append(initErrs, "linker takes no arguments")
 	}
-	if commonCfg.NextLinker != nil {
+	if dgrCfg.NextLinker != nil {
 		initErrs = append(initErrs, "linker must appear last in chain")
 	}
 
-	return &nulLinker{commonCfg}, initErrs
+	return &nulLinker{dgrCfg}, initErrs
 }

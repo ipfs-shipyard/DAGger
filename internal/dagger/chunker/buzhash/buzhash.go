@@ -29,7 +29,12 @@ type buzhashChunker struct {
 
 func (c *buzhashChunker) MinChunkSize() int { return c.MinSize }
 
-func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
+func (c *buzhashChunker) Split(
+	buf []byte,
+	useEntireBuffer bool,
+	cb chunker.SplitResultCallback,
+) (err error) {
+
 	var state uint32
 	var curIdx, lastIdx, nextRoundMax int
 	postBufIdx := len(buf)
@@ -40,8 +45,8 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(
 
 		// we will be running out of data, but still *could* run a round
 		if nextRoundMax > postBufIdx {
-			// go back for more data if we can
-			if moreDataNextInvocation {
+			// abort early if we are allowed to
+			if !useEntireBuffer {
 				return
 			}
 			// otherwise signify where we stop hard
@@ -50,8 +55,8 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(
 
 		// in case we will *NOT* be able to run another round at all
 		if curIdx+c.MinSize >= postBufIdx {
-			if !moreDataNextInvocation && postBufIdx != curIdx {
-				cb(chunker.Chunk{Size: postBufIdx - curIdx})
+			if useEntireBuffer && postBufIdx != curIdx {
+				err = cb(chunker.Chunk{Size: postBufIdx - curIdx})
 			}
 			return
 		}
@@ -67,7 +72,7 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(
 		}
 
 		// cycle
-		for curIdx < nextRoundMax && state&c.mask != c.TargetValue {
+		for curIdx < nextRoundMax && ((state & c.mask) != c.TargetValue) {
 			// it seems we are skipping one rotation compared to what asuran does
 			// https://gitlab.com/asuran-rs/asuran/-/blob/06206d116259821aded5ab1ee2897655b1724c69/asuran-chunker/src/buzhash.rs#L93
 			state = bits.RotateLeft32(state, 1) ^ c.xv[buf[curIdx]] ^ c.xv[buf[curIdx-32]]
@@ -75,11 +80,14 @@ func (c *buzhashChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(
 		}
 
 		// awlays a find at this point, we bailed on short buffers earlier
-		cb(chunker.Chunk{Size: curIdx - lastIdx})
+		err = cb(chunker.Chunk{Size: curIdx - lastIdx})
+		if err != nil {
+			return
+		}
 	}
 }
 
-func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, initErrs []string) {
+func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
 
 	c := buzhashChunker{}
 
@@ -93,6 +101,8 @@ func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, in
 	}
 	optSet.FlagLong(&c.xvName, "hash-table", 0, "The hash table to use, one of: "+util.AvailableMapKeys(hashTables))
 
+	// on nil-args the "error" is the help text to be incorporated into
+	// the larger help display
 	if args == nil {
 		return nil, util.SubHelp(
 			"Chunker based on hashing by cyclic polynomial, similar to the one used\n"+

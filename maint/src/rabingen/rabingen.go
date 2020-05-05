@@ -12,7 +12,7 @@ import (
 // this is the struct we output
 type variant struct {
 	polynomial uint64
-	windowSize int64
+	windowSize int
 	degShift   int
 	outTable   [256]uint64
 	modTable   [256]uint64
@@ -24,6 +24,7 @@ type Pol uint64
 func main() {
 
 	var v variant
+	var wSize int64
 
 	if len(os.Args) != 3 {
 		log.Fatal("Requires 2 arguments: the uint64 polynomial, and a window size")
@@ -31,11 +32,13 @@ func main() {
 
 	var err error
 	if v.polynomial, err = strconv.ParseUint(os.Args[1], 10, 64); err != nil {
-		log.Fatalf("Unable to parse uint64 polnomial '%s': %s", os.Args[1], err)
+		log.Fatalf("Unable to parse uint64 polynomial '%s': %s", os.Args[1], err)
 	}
-	if v.windowSize, err = strconv.ParseInt(os.Args[2], 10, 32); err != nil {
+	if wSize, err = strconv.ParseInt(os.Args[2], 10, 31); err != nil {
 		log.Fatalf("Unable to parse int windowSize '%s': %s", os.Args[2], err)
 	}
+
+	v.windowSize = int(wSize)
 
 	pol := Pol(v.polynomial)
 
@@ -57,7 +60,7 @@ func main() {
 		h |= Pol(b)
 		h = h.Mod(pol)
 
-		for i := int64(0); i < v.windowSize-1; i++ {
+		for i := 0; i < v.windowSize-1; i++ {
 			h <<= 8
 			h = h.Mod(pol)
 		}

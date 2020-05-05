@@ -21,6 +21,7 @@ import (
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/buzhash"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/fixedsize"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/padfinder"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/rabin"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
@@ -29,6 +30,7 @@ import (
 )
 
 var availableChunkers = map[string]chunker.Initializer{
+	"padfinder":  padfinder.NewChunker,
 	"fixed-size": fixedsize.NewChunker,
 	"buzhash":    buzhash.NewChunker,
 	"rabin":      rabin.NewChunker,
@@ -248,9 +250,9 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 					break
 				}
 
-				dgr.uniqueBlockCallback = func(hdr *block.Header) blockPostProcessResult {
+				dgr.uniqueBlockCallback = func(hdr *block.Header) *blockPostProcessResult {
 					util.InternalPanicf("car writing not yet implemented") // FIXME
-					return blockPostProcessResult{}
+					return &blockPostProcessResult{}
 				}
 			}
 		}
@@ -347,24 +349,6 @@ func printPluginUsage(
 		}
 	}
 
-	if len(listChunkers) != 0 {
-		fmt.Fprint(out, "\n")
-		sort.Strings(listChunkers)
-		for _, name := range listChunkers {
-			fmt.Fprintf(
-				out,
-				"[C]hunker '%s'\n",
-				name,
-			)
-			_, h := availableChunkers[name](nil, nil)
-			if len(h) == 0 {
-				fmt.Fprint(out, "  -- no helptext available --\n\n")
-			} else {
-				fmt.Fprintln(out, strings.Join(h, "\n"))
-			}
-		}
-	}
-
 	if len(listLinkers) != 0 {
 		fmt.Fprint(out, "\n")
 		sort.Strings(listLinkers)
@@ -380,7 +364,24 @@ func printPluginUsage(
 			} else {
 				fmt.Fprintln(out, strings.Join(h, "\n"))
 			}
+		}
+	}
 
+	if len(listChunkers) != 0 {
+		fmt.Fprint(out, "\n")
+		sort.Strings(listChunkers)
+		for _, name := range listChunkers {
+			fmt.Fprintf(
+				out,
+				"[C]hunker '%s'\n",
+				name,
+			)
+			_, h := availableChunkers[name](nil, nil)
+			if len(h) == 0 {
+				fmt.Fprint(out, "  -- no helptext available --\n\n")
+			} else {
+				fmt.Fprintln(out, strings.Join(h, "\n"))
+			}
 		}
 	}
 
@@ -476,14 +477,15 @@ func (cfg *config) parseEmitterSpecs() (argErrs []string) {
 }
 
 func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) {
-	commonCfg := chunker.CommonConfig{
+	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "::")
+
+	commonCfg := chunker.DaggerConfig{
+		LastChainIndex:     len(individualChunkers) - 1,
 		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
 		InternalPanicf:     util.InternalPanicf,
 	}
 
-	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "::")
-
-	for _, chunkerCmd := range individualChunkers {
+	for chunkerNum, chunkerCmd := range individualChunkers {
 		chunkerArgs := strings.Split(chunkerCmd, ":")
 		init, exists := availableChunkers[chunkerArgs[0]]
 		if !exists {
@@ -501,9 +503,12 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 			}
 		}
 
+		chunkerCfg := commonCfg // SHALLOW COPY!!!
+		chunkerCfg.IndexInChain = chunkerNum
+
 		if chunkerInstance, initErrors := init(
 			chunkerArgs,
-			&commonCfg,
+			&chunkerCfg,
 		); len(initErrors) > 0 {
 
 			initFailFor = append(initFailFor, chunkerArgs[0])
@@ -523,15 +528,16 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 }
 
 func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailFor []string) {
-	commonCfg := linker.CommonConfig{
+	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "::")
+
+	commonCfg := linker.DaggerConfig{
+		LastChainIndex:     len(individualLinkers) - 1,
 		InternalPanicf:     util.InternalPanicf,
 		GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
 		BlockMaker:         bm,
 		HasherName:         dgr.cfg.hashAlg,
 		HasherBits:         dgr.cfg.HashBits,
 	}
-
-	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "::")
 
 	dgr.chainedLinkers = make([]linker.Linker, len(individualLinkers))
 	// we need to process the linkers in reverse, in order to populate NextLinker
@@ -557,7 +563,10 @@ func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailF
 		}
 
 		generatorIdx := len(individualLinkers) - linkerNum
+
 		linkerCfg := commonCfg // SHALLOW COPY!!!
+		linkerCfg.IndexInChain = linkerNum
+
 		// every linker gets a callback with their own index closed over
 		linkerCfg.NewLinkBlockCallback = func(hdr *block.Header, linkerLayer int, links []*block.Header) {
 			dgr.asyncWG.Add(1)

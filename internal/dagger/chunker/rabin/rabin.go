@@ -28,15 +28,15 @@ type rabinChunker struct {
 
 func (c *rabinChunker) MinChunkSize() int { return c.MinSize }
 
-func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(res chunker.Chunk)) {
+func (c *rabinChunker) Split(
+	buf []byte,
+	useEntireBuffer bool,
+	cb chunker.SplitResultCallback,
+) (err error) {
+
 	var state uint64
 	var curIdx, lastIdx, nextRoundMax int
 	postBufIdx := len(buf)
-
-	// This gives some sort of hint to the compiler, makes shifts visibly faster
-	// https://github.com/golang/go/issues/19113#issuecomment-443306753
-	// Go figure... </trollface>
-	degShift := c.degShift & 63
 
 	for {
 		lastIdx = curIdx
@@ -44,8 +44,8 @@ func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(re
 
 		// we will be running out of data, but still *could* run a round
 		if nextRoundMax > postBufIdx {
-			// go back for more data if we can
-			if moreDataNextInvocation {
+			// abort early if we are allowed to
+			if !useEntireBuffer {
 				return
 			}
 			// otherwise signify where we stop hard
@@ -54,8 +54,8 @@ func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(re
 
 		// in case we will *NOT* be able to run another round at all
 		if curIdx+c.MinSize >= postBufIdx {
-			if !moreDataNextInvocation && postBufIdx != curIdx {
-				cb(chunker.Chunk{Size: postBufIdx - curIdx})
+			if useEntireBuffer && postBufIdx != curIdx {
+				err = cb(chunker.Chunk{Size: postBufIdx - curIdx})
 			}
 			return
 		}
@@ -71,24 +71,27 @@ func (c *rabinChunker) Split(buf []byte, moreDataNextInvocation bool, cb func(re
 			} else {
 				state ^= c.outTable[0]
 			}
-			state = (state << 8) | uint64(buf[curIdx]) ^ (c.modTable[state>>degShift])
+			state = (state << 8) | uint64(buf[curIdx]) ^ (c.modTable[state>>45])
 
 			curIdx++
 		}
 
 		// cycle
-		for curIdx < nextRoundMax && (state&c.mask) != c.TargetValue {
+		for curIdx < nextRoundMax && ((state & c.mask) != c.TargetValue) {
 			state ^= c.outTable[buf[curIdx-c.windowSize]]
-			state = (state << 8) | uint64(buf[curIdx]) ^ (c.modTable[state>>degShift])
+			state = (state << 8) | uint64(buf[curIdx]) ^ (c.modTable[state>>45])
 			curIdx++
 		}
 
 		// awlays a find at this point, we bailed on short buffers earlier
-		cb(chunker.Chunk{Size: curIdx - lastIdx})
+		err = cb(chunker.Chunk{Size: curIdx - lastIdx})
+		if err != nil {
+			return
+		}
 	}
 }
 
-func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, initErrs []string) {
+func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
 
 	c := rabinChunker{}
 
@@ -102,9 +105,14 @@ func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, in
 	}
 	optSet.FlagLong(&c.presetName, "rabin-preset", 0, "The precomputed rabin preset to use, one of: "+util.AvailableMapKeys(rabinPresets))
 
+	// on nil-args the "error" is the help text to be incorporated into
+	// the larger help display
 	if args == nil {
 		return nil, util.SubHelp(
-			"Chunker based on FIXME",
+			"Chunker based on the venerable 'Rabin Fingerprint', similar to the one\n"+
+				"used by `restic`, the LBFS, and others. Uses precomputed lookup tables for\n"+
+				"a polynomial of degree 53, selectable via the rabin-preset option. This is\n"+
+				"a slimmed-down implementation, adapted from multiple \"classic\" versions.\n",
 			optSet,
 		)
 	}
@@ -168,9 +176,9 @@ func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, in
 		return nil, initErrs
 	}
 
-	// with the currently available table this is simply the value 1
+	// Due to outTable[0] always being 0, this is simply the value 1
 	// but derive it longform nevertheless
-	c.initState = ((c.outTable[0] << 8) | 1) ^ (c.modTable[c.outTable[0]>>c.degShift])
+	c.initState = ((c.outTable[0] << 8) | 1) ^ (c.modTable[c.outTable[0]>>45])
 	c.minSansPreheat = c.MinSize - c.windowSize
 
 	return &c, initErrs
@@ -179,8 +187,8 @@ func NewChunker(args []string, cfg *chunker.CommonConfig) (_ chunker.Chunker, in
 type preset struct {
 	outTable   [256]uint64
 	modTable   [256]uint64
-	degShift   uint
 	windowSize int
+	degShift   int
 	polynomial uint64
 }
 

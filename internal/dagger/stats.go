@@ -102,7 +102,7 @@ type uniqueBlockStats struct {
 	sizeData  int // recorded but not aggregated for output at present
 	sizeBlock int
 	seenAt    seenTimesAt
-	blockPostProcessResult
+	*blockPostProcessResult
 }
 type generatedBy struct {
 	generatorIndex int

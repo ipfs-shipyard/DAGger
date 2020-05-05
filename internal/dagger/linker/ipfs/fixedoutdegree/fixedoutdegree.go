@@ -21,7 +21,7 @@ type config struct {
 }
 type linker struct {
 	config
-	*linkerbase.CommonConfig
+	*linkerbase.DaggerConfig
 	state
 }
 type state struct {
@@ -98,22 +98,24 @@ func (l *linker) DeriveRoot() *block.Header {
 	return l.stack[len(l.stack)-1][0]
 }
 
-func NewLinker(args []string, commonCfg *linkerbase.CommonConfig) (_ linkerbase.Linker, initErrs []string) {
+func NewLinker(args []string, dgrCfg *linkerbase.DaggerConfig) (_ linkerbase.Linker, initErrs []string) {
 
 	l := &linker{
-		CommonConfig: commonCfg,
+		DaggerConfig: dgrCfg,
 		state:        state{stack: [][]*block.Header{{}}},
 	}
 
 	optSet := getopt.New()
 	if err := options.RegisterSet("", &l.config, optSet); err != nil {
 		// A panic as this should not be possible
-		commonCfg.InternalPanicf(
+		dgrCfg.InternalPanicf(
 			"option set registration failed: %s",
 			err,
 		)
 	}
 
+	// on nil-args the "error" is the help text to be incorporated into
+	// the larger help display
 	if args == nil {
 		return nil, util.SubHelp(
 			"Produces a DAG with every node having a fixed outdegree (amount of children)\n"+
