@@ -22,9 +22,9 @@ const (
 	pbHdrF4LD = byte(0x22)
 )
 
-func UnixFSv1Leaf(ds block.DataSource, bm block.Maker, leafUnixFsType byte) *block.Header {
+func UnixFSv1Leaf(ls block.LeafSource, bm block.Maker, leafUnixFsType byte) *block.Header {
 
-	if ds.Size == 0 {
+	if ls.Size == 0 {
 		// short-circuit for convergence with go-ipfs
 		// represents the following protobuf regardless of settings
 		// 1 {
@@ -40,23 +40,23 @@ func UnixFSv1Leaf(ds block.DataSource, bm block.Maker, leafUnixFsType byte) *blo
 		)
 	}
 
-	dataLen := enc.VarintSlice(uint64(ds.Size))
+	dataLen := enc.VarintSlice(uint64(ls.Size))
 
 	blockData := zcpstring.NewWithSegmentCap(9)
 	blockData.AddByte(pbHdrF1LD)
-	blockData.AddSlice(enc.VarintSlice(uint64(3 + 2*len(dataLen) + ds.Size + 1)))
+	blockData.AddSlice(enc.VarintSlice(uint64(3 + 2*len(dataLen) + ls.Size + 1)))
 	blockData.AddByte(pbHdrF1VI)
 	blockData.AddByte(leafUnixFsType)
 	blockData.AddByte(pbHdrF2LD)
 	blockData.AddSlice(dataLen)
-	blockData.AddZcp(ds.Content)
+	blockData.AddZcp(ls.Content)
 	blockData.AddByte(pbHdrF3VI)
 	blockData.AddSlice(dataLen)
 
 	return bm(
 		blockData,
 		block.CodecPB,
-		uint64(ds.Size),
+		uint64(ls.Size),
 		0,
 		0,
 	)

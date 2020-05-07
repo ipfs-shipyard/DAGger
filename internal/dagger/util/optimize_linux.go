@@ -12,7 +12,7 @@ func init() {
 	// trying smaller and smaller powers of 2 ( starting from 32MiB ),
 	// as the entire process is opportunistic and depends on system tuning.
 	// This unfortunately only works on Linux
-	// Background: https://github.com/afborchert/pipebuf
+	// Background: https://github.com/afborchert/pipebuf#related-discussions
 	ReadOptimizations = append(ReadOptimizations, FileHandleOptimization{
 		"F_SETPIPE_SZ",
 		func(file *os.File, stat os.FileInfo) (err error) {

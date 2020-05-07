@@ -11,8 +11,8 @@ import (
 	"github.com/twmb/murmur3"
 	"golang.org/x/crypto/sha3"
 
+	"github.com/ipfs-shipyard/DAGger/chunker"
 	"github.com/ipfs-shipyard/DAGger/constants"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/enc"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	"github.com/ipfs-shipyard/DAGger/internal/zcpstring"
@@ -111,7 +111,6 @@ func (h *Header) IsInlined() bool               { return h.isInlined }
 func (h *Header) DummyHashed() bool             { return h.dummyHashed }
 func (h *Header) SizeCumulativeDag() uint64     { return h.totalSizeDag }
 func (h *Header) SizeCumulativePayload() uint64 { return h.totalSizePayload }
-func (h *Header) IsSparse() bool                { return false } // FIXME
 
 type Maker func(
 	blockContent *zcpstring.ZcpString,
@@ -121,16 +120,16 @@ type Maker func(
 	sizeLinkSection int,
 ) *Header
 
-type DataSource struct {
+type LeafSource struct {
 	chunker.Chunk // critically *NOT* a reference, so that DataSource{} is usable on its own
 	Content       *zcpstring.ZcpString
 }
 
-func RawDataLeaf(ds DataSource, bm Maker) *Header {
+func RawDataLeaf(ls LeafSource, bm Maker) *Header {
 	return bm(
-		ds.Content,
+		ls.Content,
 		CodecRaw,
-		uint64(ds.Size),
+		uint64(ls.Size),
 		0,
 		0,
 	)

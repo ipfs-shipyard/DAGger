@@ -4,47 +4,29 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+	"github.com/ipfs-shipyard/DAGger/chunker"
+	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 )
 
-type fixedSizeChunker struct {
-	size int
-}
-
-func (c *fixedSizeChunker) MinChunkSize() int { return c.size }
-
-func (c *fixedSizeChunker) Split(
-	buf []byte,
-	useEntireBuffer bool,
-	cb chunker.SplitResultCallback,
-) (err error) {
-	curIdx := c.size
-
-	for curIdx < len(buf) {
-		err = cb(chunker.Chunk{Size: c.size})
-		if err != nil {
-			return
-		}
-		curIdx += c.size
-	}
-
-	if curIdx-c.size < len(buf) && useEntireBuffer {
-		err = cb(chunker.Chunk{Size: len(buf) - (curIdx - c.size)})
-	}
-	return
-}
-
-func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
+func NewChunker(
+	args []string,
+	dgrCfg *dgrchunker.DaggerConfig,
+) (
+	_ chunker.Chunker,
+	_ dgrchunker.InstanceConstants,
+	initErrs []string,
+) {
 
 	// on nil-args the "error" is the help text to be incorporated into
 	// the larger help display
 	if args == nil {
-		return nil, util.SubHelp(
+		initErrs = util.SubHelp(
 			"Splits buffer into equally sized chunks. Requires a single parameter: the\n"+
 				"size of each chunk in bytes (IPFS default: 262144)\n",
 			nil,
 		)
+		return
 	}
 
 	c := fixedSizeChunker{}
@@ -64,13 +46,13 @@ func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, in
 		}
 	}
 
-	if c.size > cfg.GlobalMaxChunkSize {
+	if c.size > dgrCfg.GlobalMaxChunkSize {
 		initErrs = append(initErrs, fmt.Sprintf(
 			"provided chunk size '%s' exceeds specified maximum payload size '%s",
 			util.Commify(c.size),
-			util.Commify(cfg.GlobalMaxChunkSize),
+			util.Commify(dgrCfg.GlobalMaxChunkSize),
 		))
 	}
 
-	return &c, initErrs
+	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.size}, initErrs
 }

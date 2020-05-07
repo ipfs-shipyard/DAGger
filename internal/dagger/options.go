@@ -18,27 +18,27 @@ import (
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/buzhash"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/fixedsize"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/padfinder"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/rabin"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/fixedoutdegree"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/ipfs/trickle"
+	dgrlinker "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/fixedoutdegree"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/trickle"
 )
 
-var availableChunkers = map[string]chunker.Initializer{
+var availableChunkers = map[string]dgrchunker.Initializer{
 	"padfinder":  padfinder.NewChunker,
 	"fixed-size": fixedsize.NewChunker,
 	"buzhash":    buzhash.NewChunker,
 	"rabin":      rabin.NewChunker,
 }
-var availableLinkers = map[string]linker.Initializer{
+var availableLinkers = map[string]dgrlinker.Initializer{
 	"ipfs-fixed-outdegree": fixedoutdegree.NewLinker,
 	"ipfs-trickle":         trickle.NewLinker,
-	"none":                 linker.NewNulLinker,
+	"none":                 dgrlinker.NewNulLinker,
 }
 
 const (
@@ -116,7 +116,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 			StatsEnabled: statsBlocks,
 
-			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 128*1024, // bare-minimum with defaults
+			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 256*1024, // bare-minimum with defaults
 			RingBufferSize: 24 * 1024 * 1024, // SANCHECK low seems good somehow... fits in L3 maybe?
 
 			//SANCHECK: these numbers have not been validated
@@ -262,7 +262,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 	if cfg.requestedChunkers == "" {
 		argErrs = append(argErrs,
-			"You must specify at least one stream chunker via '--chunkers=algname1:opt1:opt2::algname2:...'. Available chunker names are: "+
+			"You must specify at least one stream chunker via '--chunkers=algname1_opt1_opt2__algname2_...'. Available chunker names are: "+
 				util.AvailableMapKeys(availableChunkers),
 		)
 	} else if errorMessages, cfg.erroredChunkers = dgr.setupChunkerChain(); len(errorMessages) > 0 {
@@ -271,7 +271,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 	if cfg.optSet.IsSet("linkers") && cfg.requestedLinkers == "" {
 		argErrs = append(argErrs,
-			"When specified linker chain must be in the form '--linkers=algname1:opt1:opt2::algname2:...'. Available linker names are: "+
+			"When specified linker chain must be in the form '--linkers=algname1_opt1_opt2__algname2_...'. Available linker names are: "+
 				util.AvailableMapKeys(availableLinkers),
 		)
 	} else if errorMessages, cfg.erroredLinkers = dgr.setupLinkerChain(blockMaker); len(errorMessages) > 0 {
@@ -376,7 +376,7 @@ func printPluginUsage(
 				"[C]hunker '%s'\n",
 				name,
 			)
-			_, h := availableChunkers[name](nil, nil)
+			_, _, h := availableChunkers[name](nil, nil)
 			if len(h) == 0 {
 				fmt.Fprint(out, "  -- no helptext available --\n\n")
 			} else {
@@ -405,11 +405,11 @@ func (cfg *config) initArgvParser() {
 	o.FlagLong(&cfg.hashAlg, "hash", 0, "Hash algorithm to use, one of: "+util.AvailableMapKeys(block.AvailableHashers))
 	o.FlagLong(&cfg.requestedChunkers, "chunkers", 0,
 		"Stream chunking algorithm chain. Each chunker is one of: "+util.AvailableMapKeys(availableChunkers),
-		"'ch1:o1.1:o1.2:...:o1.N::ch2:o2.1:o2.2:...:o2.N::ch3...'",
+		"'ch1_o1.1_o1.2_..._o1.N__ch2_o2.1_o2.2_..._o2.N__ch3_...'",
 	)
 	o.FlagLong(&cfg.requestedLinkers, "linkers", 0,
 		"Block linking algorithm chain. Each linker is one of: "+util.AvailableMapKeys(availableLinkers),
-		"'ln1:o1.1:o1.2:...:o1.N::ln.2...'",
+		"'ln1_o1.1_o1.2_..._o1.N__ln.2_...'",
 	)
 	o.FlagLong(&cfg.emittersStdErr, "emit-stderr", 0, fmt.Sprintf(
 		"One or more emitters to activate on stdERR. Available emitters are %s. Default: ",
@@ -477,16 +477,16 @@ func (cfg *config) parseEmitterSpecs() (argErrs []string) {
 }
 
 func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) {
-	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "::")
+	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "__")
 
-	commonCfg := chunker.DaggerConfig{
+	commonCfg := dgrchunker.DaggerConfig{
 		LastChainIndex:     len(individualChunkers) - 1,
 		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
 		InternalPanicf:     util.InternalPanicf,
 	}
 
 	for chunkerNum, chunkerCmd := range individualChunkers {
-		chunkerArgs := strings.Split(chunkerCmd, ":")
+		chunkerArgs := strings.Split(chunkerCmd, "_")
 		init, exists := availableChunkers[chunkerArgs[0]]
 		if !exists {
 			argErrs = append(argErrs, fmt.Sprintf(
@@ -506,7 +506,7 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 		chunkerCfg := commonCfg // SHALLOW COPY!!!
 		chunkerCfg.IndexInChain = chunkerNum
 
-		if chunkerInstance, initErrors := init(
+		if chunkerInstance, chunkerConstants, initErrors := init(
 			chunkerArgs,
 			&chunkerCfg,
 		); len(initErrors) > 0 {
@@ -520,7 +520,10 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 				))
 			}
 		} else {
-			dgr.chainedChunkers = append(dgr.chainedChunkers, chunkerInstance)
+			dgr.chainedChunkers = append(dgr.chainedChunkers, dgrChunkerUnit{
+				instance:  chunkerInstance,
+				constants: chunkerConstants,
+			})
 		}
 	}
 
@@ -528,9 +531,9 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 }
 
 func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailFor []string) {
-	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "::")
+	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "__")
 
-	commonCfg := linker.DaggerConfig{
+	commonCfg := dgrlinker.DaggerConfig{
 		LastChainIndex:     len(individualLinkers) - 1,
 		InternalPanicf:     util.InternalPanicf,
 		GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
@@ -539,13 +542,13 @@ func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailF
 		HasherBits:         dgr.cfg.HashBits,
 	}
 
-	dgr.chainedLinkers = make([]linker.Linker, len(individualLinkers))
+	dgr.chainedLinkers = make([]dgrlinker.Linker, len(individualLinkers))
 	// we need to process the linkers in reverse, in order to populate NextLinker
 	for linkerNum := len(individualLinkers) - 1; linkerNum >= 0; linkerNum-- {
 
 		linkerCmd := individualLinkers[linkerNum]
 
-		linkerArgs := strings.Split(linkerCmd, ":")
+		linkerArgs := strings.Split(linkerCmd, "_")
 		init, exists := availableLinkers[linkerArgs[0]]
 		if !exists {
 			argErrs = append(argErrs, fmt.Sprintf(
@@ -703,7 +706,7 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 			linkerOpts = append(linkerOpts, "unixfs-leaves")
 		}
 
-		cfg.requestedLinkers = strings.Join(linkerOpts, ":")
+		cfg.requestedLinkers = strings.Join(linkerOpts, "_")
 	}
 
 	// ignore everything compat if a chunker is already given
@@ -713,9 +716,9 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 			sizeopts := strings.Split(ipfsOpts.Chunker, "-")
 			if sizeopts[0] == "size" {
 				if len(sizeopts) == 1 {
-					cfg.requestedChunkers = "fixed-size:262144"
+					cfg.requestedChunkers = "fixed-size_262144"
 				} else if len(sizeopts) == 2 {
-					cfg.requestedChunkers = "fixed-size:" + sizeopts[1]
+					cfg.requestedChunkers = "fixed-size_" + sizeopts[1]
 				}
 			}
 		} else if strings.HasPrefix(ipfsOpts.Chunker, "rabin") {
@@ -745,7 +748,7 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 				}
 
 				if bits != "" {
-					cfg.requestedChunkers = fmt.Sprintf("rabin:rabin-preset=GoIPFSv0:state-target=0:state-mask-bits=%s:min-size=%s:max-size=%s",
+					cfg.requestedChunkers = fmt.Sprintf("rabin_rabin-preset=GoIPFSv0_state-target=0_state-mask-bits=%s_min-size=%s_max-size=%s",
 						bits,
 						min,
 						max,
@@ -756,7 +759,7 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 			buzopts := strings.Split(ipfsOpts.Chunker, "-")
 			if buzopts[0] == "buzhash" {
 				if len(buzopts) == 1 {
-					cfg.requestedChunkers = "buzhash:hash-table=GoIPFSv0:state-target=0:state-mask-bits=17:min-size=131072:max-size=524288"
+					cfg.requestedChunkers = "buzhash_hash-table=GoIPFSv0_state-target=0_state-mask-bits=17_min-size=131072_max-size=524288"
 				}
 			}
 		}

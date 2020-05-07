@@ -1,16 +1,10 @@
 package trickle
 
 import (
-	"fmt"
 	"math"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/enc/dagpb"
-	linkerbase "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
-
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
-	getopt "github.com/pborman/getopt/v2"
-	"github.com/pborman/options"
 )
 
 type config struct {
@@ -19,12 +13,7 @@ type config struct {
 	LegacyDecoratedLeaves bool `getopt:"--unixfs-leaves           Generate leaves as full UnixFS file nodes"`
 	LegacyCIDv0Links      bool `getopt:"--cidv0                   Generate compat-mode CIDv0 links"`
 	NonstandardLeanLinks  bool `getopt:"--non-standard-lean-links Omit dag-size and offset information from all links. While IPFS likely will render the result, one voids all warranties"`
-	newLeaf               func(block.DataSource) *block.Header
-}
-type linker struct {
-	config
-	*linkerbase.DaggerConfig
-	state
+	newLeaf               func(block.LeafSource) *block.Header
 }
 type state struct {
 	leafCount    int
@@ -40,7 +29,7 @@ type trickleNode struct {
 // at `7 = log( X/174 ) / log( 1+4 )` X comes out to 13,593,750 blocks to link before we need more allocs
 const descentPrealloc = 7
 
-func (l *linker) NewLeafBlock(ds block.DataSource) *block.Header { return l.newLeaf(ds) }
+func (l *linker) NewLeafBlock(ls block.LeafSource) *block.Header { return l.newLeaf(ls) }
 
 func (l *linker) NewLinkBlock(blocks []*block.Header) *block.Header {
 	return dagpb.UnixFSv1LinkNode(
@@ -159,7 +148,7 @@ func (l *linker) DeriveRoot() *block.Header {
 		l.state.tail.directLeaves[0].SizeCumulativePayload() == 0 {
 		// convergence requires a pb leaf regardless of what "LegacyDecoratedLeaves" is set to, go figure...
 		zeroRoot := dagpb.UnixFSv1Leaf(
-			block.DataSource{},
+			block.LeafSource{},
 			l.BlockMaker,
 			dagpb.UnixFsTypeRaw,
 		)
@@ -170,155 +159,3 @@ func (l *linker) DeriveRoot() *block.Header {
 	l.sealToLevel(0)
 	return l.tail.directLeaves[0]
 }
-
-func NewLinker(args []string, dgrCfg *linkerbase.DaggerConfig) (_ linkerbase.Linker, initErrs []string) {
-
-	l := &linker{
-		DaggerConfig: dgrCfg,
-	}
-
-	optSet := getopt.New()
-	if err := options.RegisterSet("", &l.config, optSet); err != nil {
-		// A panic as this should not be possible
-		dgrCfg.InternalPanicf(
-			"option set registration failed: %s",
-			err,
-		)
-	}
-
-	// on nil-args the "error" is the help text to be incorporated into
-	// the larger help display
-	if args == nil {
-		return nil, util.SubHelp(
-			"Produces a \"side-balanced\" DAG optimized for streaming. Data blocks further\n"+
-				"away from the stream start are arranged in nodes at increasing depth away\n"+
-				"from the root. The rough \"placement group\" for a particular node LeafIndex\n"+
-				"away from the stream start can be derived numerically via:\n"+
-				"int( log( LeafIndex / MaxDirectLeaves ) / log( 1 + MaxSiblingSubgroups ) )\n"+
-				"See the example program in trickle.go for more info\n"+
-				"First argument must be a version specifier 'vN'. Currently only supports\n"+
-				"'v0', generating go-ipfs-standard, inefficient, 'Tsize'-full linknodes.",
-			optSet,
-		)
-	}
-
-	// bail early if version unset
-	if len(args) < 2 || args[1] != "--v0" {
-		return nil, []string{"first linker option must be a version - currently only 'v0' is supported"}
-	}
-
-	if l.NextLinker != nil {
-		initErrs = append(
-			initErrs,
-			"v0 linker must appear last in chain",
-		)
-	}
-
-	args = append(
-		[]string{args[0]},
-		// drop the v0
-		args[2:]...,
-	)
-
-	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		return nil, []string{err.Error()}
-	}
-
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
-	}
-
-	if l.LegacyCIDv0Links &&
-		(l.HasherName != "sha2-256" ||
-			l.HasherBits != 256) {
-		initErrs = append(
-			initErrs,
-			"legacy CIDv0 linking requires --hash=sha2-256 and --hash-bits=256",
-		)
-	}
-
-	if l.MaxDirectLeaves < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-direct-leaves' %d is out of range [1:...]",
-			l.MaxDirectLeaves,
-		))
-	}
-
-	if l.MaxSiblingSubgroups < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-sibling-subgroups' %d is out of range [1:...]",
-			l.MaxSiblingSubgroups,
-		))
-	}
-
-	if l.LegacyDecoratedLeaves {
-		l.newLeaf = func(ds block.DataSource) *block.Header {
-			return dagpb.UnixFSv1Leaf(ds, l.BlockMaker, dagpb.UnixFsTypeRaw)
-		}
-	} else {
-		l.newLeaf = func(ds block.DataSource) *block.Header {
-			return block.RawDataLeaf(ds, l.BlockMaker)
-		}
-	}
-
-	return l, initErrs
-}
-
-// Complete CLI program demonstrating node placement
-//
-/*
-
-package main
-
-import (
-	"fmt"
-	"math"
-)
-
-const (
-	totalLeaves         = 200
-	maxDirectLeaves     = 4 // ipfs default is 174
-	maxSiblingSubgroups = 2 // ipfs default is 4
-)
-
-func main() {
-	for existingLeafCount := 0; existingLeafCount <= totalLeaves; existingLeafCount++ {
-
-		// displaying direct leaf population is not interesting
-		if (existingLeafCount % maxDirectLeaves) != 0 {
-			continue
-		}
-
-		// all calculations below rely on the pre-existing leaf count ( 0-based index if you will )
-		remainingLeaves := existingLeafCount
-		fmt.Printf("%5s", fmt.Sprintf("#%d", remainingLeaves))
-
-		for remainingLeaves >= maxDirectLeaves {
-
-			descentLevel := int(
-				(math.Log(float64((remainingLeaves) / maxDirectLeaves))) /
-					math.Log(float64((1 + maxSiblingSubgroups))),
-			)
-
-			descentLevelMembers := maxDirectLeaves * int(math.Pow(
-				float64(maxSiblingSubgroups+1),
-				float64(descentLevel),
-			))
-
-			if remainingLeaves >= descentLevelMembers {
-				subGroupNodeIndexAtLevel := (remainingLeaves / descentLevelMembers) + (descentLevel * maxSiblingSubgroups)
-				fmt.Printf("\t%d", subGroupNodeIndexAtLevel)
-			}
-
-			remainingLeaves %= descentLevelMembers
-		}
-		fmt.Print("\n")
-	}
-}
-
-*/

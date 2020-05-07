@@ -1,14 +1,9 @@
 package buzhash
 
 import (
-	"fmt"
 	"math/bits"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
-
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
-	getopt "github.com/pborman/getopt/v2"
-	"github.com/pborman/options"
+	"github.com/ipfs-shipyard/DAGger/chunker"
 )
 
 type config struct {
@@ -16,7 +11,7 @@ type config struct {
 	MaskBits    int    `getopt:"--state-mask-bits Amount of bits of state to compare to target on every iteration. For random input average chunk size is about 2**m (IPFS default: 17)"`
 	MaxSize     int    `getopt:"--max-size Maximum data chunk size (IPFS default: 524288)"`
 	MinSize     int    `getopt:"--min-size Minimum data chunk size (IPFS default: 131072)"`
-	xvName      string // getopt attached dynamically below
+	xvName      string // getopt attached dynamically during init
 }
 
 type buzhashChunker struct {
@@ -26,8 +21,6 @@ type buzhashChunker struct {
 	xv             xorVector
 	config
 }
-
-func (c *buzhashChunker) MinChunkSize() int { return c.MinSize }
 
 func (c *buzhashChunker) Split(
 	buf []byte,
@@ -85,91 +78,6 @@ func (c *buzhashChunker) Split(
 			return
 		}
 	}
-}
-
-func NewChunker(args []string, cfg *chunker.DaggerConfig) (_ chunker.Chunker, initErrs []string) {
-
-	c := buzhashChunker{}
-
-	optSet := getopt.New()
-	if err := options.RegisterSet("", &c.config, optSet); err != nil {
-		// A panic as this should not be possible
-		cfg.InternalPanicf(
-			"option set registration failed: %s",
-			err,
-		)
-	}
-	optSet.FlagLong(&c.xvName, "hash-table", 0, "The hash table to use, one of: "+util.AvailableMapKeys(hashTables))
-
-	// on nil-args the "error" is the help text to be incorporated into
-	// the larger help display
-	if args == nil {
-		return nil, util.SubHelp(
-			"Chunker based on hashing by cyclic polynomial, similar to the one used\n"+
-				"in 'attic-backup'. As source of \"hashing\" uses a predefined table of\n"+
-				"values selectable via the hash-table option.",
-			optSet,
-		)
-	}
-
-	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		return nil, []string{err.Error()}
-	}
-
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
-	}
-
-	if c.MinSize < 1 || c.MinSize > cfg.GlobalMaxChunkSize-1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value for 'min-size' in the range [1:%d] must be specified",
-			cfg.GlobalMaxChunkSize-1,
-		),
-		)
-	}
-	if c.MaxSize < 1 || c.MaxSize > cfg.GlobalMaxChunkSize {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value for 'max-size' in the range [1:%d] must be specified",
-			cfg.GlobalMaxChunkSize,
-		),
-		)
-	}
-	if c.MinSize >= c.MaxSize {
-		initErrs = append(initErrs,
-			"value for 'max-size' must be larger than 'min-size'",
-		)
-	}
-
-	if !optSet.IsSet("state-target") {
-		initErrs = append(initErrs,
-			"value for the uint32 'state-target' must be specified",
-		)
-	}
-
-	if c.MaskBits < 8 || c.MaskBits > 22 {
-		initErrs = append(initErrs,
-			"value for 'state-mask-bits' in the range [8:22] must be specified",
-		)
-	}
-	c.mask = 1<<uint(c.MaskBits) - 1
-
-	var exists bool
-	if c.xv, exists = hashTables[c.xvName]; !exists {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unknown hash-table '%s' requested, available names are: %s",
-			c.xvName,
-			util.AvailableMapKeys(hashTables),
-		))
-	}
-
-	c.minSansPreheat = c.MinSize - 32
-
-	return &c, initErrs
 }
 
 type xorVector [256]uint32

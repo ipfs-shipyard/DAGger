@@ -30,7 +30,7 @@ func main() {
 
 		var size int64
 
-		// FIXME: entire scope is a crappy repacement for https://github.com/klauspost/compress/issues/237
+		// FIXME: entire scope is a crappy replacement for https://github.com/klauspost/compress/issues/237
 		{
 			var out bytes.Buffer
 			nativeZstd := exec.Command("zstd", "-lv", fn)

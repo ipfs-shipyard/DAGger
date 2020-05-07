@@ -1,4 +1,4 @@
-package linker
+package dgrlinker
 
 import (
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
@@ -6,7 +6,7 @@ import (
 )
 
 type Linker interface {
-	NewLeafBlock(leafData block.DataSource) (leafBlock *block.Header)
+	NewLeafBlock(leafSource block.LeafSource) (leafBlock *block.Header)
 	NewLinkBlock(blocksToLink []*block.Header) (linkBlock *block.Header)
 	AppendBlock(blockToAppendToStream *block.Header)
 	DeriveRoot() (rootBlockAfterReducingAndDestroyingLinkerState *block.Header)
@@ -40,8 +40,8 @@ type Initializer func(
 //
 type nulLinker struct{ *DaggerConfig }
 
-func (l *nulLinker) NewLeafBlock(ds block.DataSource) *block.Header {
-	return block.RawDataLeaf(ds, l.BlockMaker)
+func (l *nulLinker) NewLeafBlock(ls block.LeafSource) *block.Header {
+	return block.RawDataLeaf(ls, l.BlockMaker)
 }
 func (l *nulLinker) NewLinkBlock([]*block.Header) *block.Header { return nil }
 func (l *nulLinker) AppendBlock(*block.Header)                  { return }

@@ -1,19 +1,9 @@
-package chunker
+package dgrchunker
 
-type Chunker interface {
-	MinChunkSize() (constantSmallestPossibleEmittedChunk int)
-	Split(
-		rawDataBuffer []byte,
-		useEntireBuffer bool,
-		resultCallback SplitResultCallback,
-	) error
-}
+import "github.com/ipfs-shipyard/DAGger/chunker"
 
-type SplitResultCallback func(Chunk) error
-
-type Chunk struct {
-	Size int
-	Meta map[interface{}]interface{}
+type InstanceConstants struct {
+	MinChunkSize int
 }
 
 type DaggerConfig struct {
@@ -26,4 +16,8 @@ type DaggerConfig struct {
 type Initializer func(
 	chunkerCLISubArgs []string,
 	cfg *DaggerConfig,
-) (instance Chunker, initErrorStrings []string)
+) (
+	instance chunker.Chunker,
+	constants InstanceConstants,
+	initErrorStrings []string,
+)
