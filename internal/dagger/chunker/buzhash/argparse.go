@@ -1,10 +1,11 @@
-package rabin
+package buzhash
 
 import (
 	"fmt"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
@@ -19,26 +20,22 @@ func NewChunker(
 	initErrs []string,
 ) {
 
-	c := rabinChunker{}
+	c := buzhashChunker{}
 
 	optSet := getopt.New()
 	if err := options.RegisterSet("", &c.config, optSet); err != nil {
-		// A panic as this should not be possible
-		dgrCfg.InternalPanicf(
-			"option set registration failed: %s",
-			err,
-		)
+		initErrs = []string{fmt.Sprintf("option set registration failed: %s", err)}
+		return
 	}
-	optSet.FlagLong(&c.presetName, "rabin-preset", 0, "The precomputed rabin preset to use, one of: "+util.AvailableMapKeys(rabinPresets))
+	optSet.FlagLong(&c.xvName, "hash-table", 0, "The hash table to use, one of: "+util.AvailableMapKeys(hashTables))
 
 	// on nil-args the "error" is the help text to be incorporated into
 	// the larger help display
 	if args == nil {
 		initErrs = util.SubHelp(
-			"Chunker based on the venerable 'Rabin Fingerprint', similar to the one\n"+
-				"used by `restic`, the LBFS, and others. Uses precomputed lookup tables for\n"+
-				"a polynomial of degree 53, selectable via the rabin-preset option. This is\n"+
-				"a slimmed-down implementation, adapted from multiple \"classic\" versions.\n",
+			"Chunker based on hashing by cyclic polynomial, similar to the one used\n"+
+				"in 'attic-backup'. As source of \"hashing\" uses a predefined table of\n"+
+				"values selectable via the hash-table option.",
 			optSet,
 		)
 		return
@@ -80,7 +77,7 @@ func NewChunker(
 
 	if !optSet.IsSet("state-target") {
 		initErrs = append(initErrs,
-			"value for the uint64 'state-target' must be specified",
+			"value for the uint32 'state-target' must be specified",
 		)
 	}
 
@@ -92,18 +89,15 @@ func NewChunker(
 	c.mask = 1<<uint(c.MaskBits) - 1
 
 	var exists bool
-	if c.preset, exists = rabinPresets[c.presetName]; !exists {
+	if c.xv, exists = hashTables[c.xvName]; !exists {
 		initErrs = append(initErrs, fmt.Sprintf(
-			"unknown rabin-preset '%s' requested, available names are: %s",
-			c.presetName,
-			util.AvailableMapKeys(rabinPresets),
+			"unknown hash-table '%s' requested, available names are: %s",
+			c.xvName,
+			util.AvailableMapKeys(hashTables),
 		))
 	}
 
-	// Due to outTable[0] always being 0, this is simply the value 1
-	// but derive it longform nevertheless
-	c.initState = ((c.outTable[0] << 8) | 1) ^ (c.modTable[c.outTable[0]>>45])
-	c.minSansPreheat = c.MinSize - c.windowSize
+	c.minSansPreheat = c.MinSize - 32
 
 	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.MinSize}, initErrs
 }

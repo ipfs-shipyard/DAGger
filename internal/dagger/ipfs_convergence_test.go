@@ -2,6 +2,7 @@ package dagger
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -11,8 +12,7 @@ import (
 
 	"golang.org/x/exp/rand"
 
-	"github.com/ipfs-shipyard/DAGger/constants"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 )
 
 // base command => expected cid => file
@@ -81,27 +81,39 @@ func TestGoIpfsConvergence(t *testing.T) {
 					}
 				}()
 
-				roots := make(chan *block.Header, 128)
+				events := make(chan IngestionEvent, 128)
 
-				dgr, _ := NewFromArgv(args)
-				streamErr := dgr.ProcessReader(
+				go NewFromArgv(args).ProcessReader(
 					dataIn,
-					roots,
+					events,
 				)
 
-				if streamErr != nil {
-					t.Fatalf("Unexpected stream processing error: %s", streamErr)
+				type rootEvent struct {
+					Cid string
 				}
+				var cidNum int
+				for {
+					ev, chanOpen := <-events
+					if !chanOpen {
+						break
+					} else if ev.Type == ErrorString {
+						t.Fatalf("Unexpected stream processing error: %s", ev.Body)
+					} else if ev.Type == NewRootJsonl {
+						var r rootEvent
+						if err := json.Unmarshal([]byte(ev.Body), &r); err != nil {
+							t.Fatalf("Unexpected event unmarshal error: %s", err)
+						}
 
-				for i, wantCid := range tuples.expectedCIDs {
-					r := <-roots
-					if r.CidBase32() != wantCid {
-						t.Fatalf(
-							"Expected root CID %s for %s, but instead generated %s",
-							wantCid,
-							tuples.compressedInputFiles[i],
-							r.CidBase32(),
-						)
+						if r.Cid != tuples.expectedCIDs[cidNum] {
+							t.Fatalf(
+								"Expected root CID %s for %s, but instead generated %s",
+								tuples.expectedCIDs[cidNum],
+								tuples.compressedInputFiles[cidNum],
+								r.Cid,
+							)
+						}
+
+						cidNum++
 					}
 				}
 			},
@@ -144,7 +156,7 @@ func parseConvergenceData(convDataFn string) convergenceTestMatrix {
 		// fields["CidVer"] != "1" ||
 		// fields["Inlining"] != "0" ||
 		// strings.Contains(fields["Chunker"], "buz") ||
-		// !strings.Contains(fields["Data"], "uicro") {
+		// !strings.Contains(fields["Data"], "zero") ||
 		if fields["Impl"] != "go" {
 			continue
 		}

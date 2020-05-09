@@ -10,7 +10,6 @@ type DaggerConfig struct {
 	IndexInChain       int
 	LastChainIndex     int
 	GlobalMaxChunkSize int
-	InternalPanicf     func(format string, args ...interface{})
 }
 
 type Initializer func(

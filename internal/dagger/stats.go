@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	dgrencoder "github.com/ipfs-shipyard/DAGger/internal/dagger/encoder"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
-
 	"github.com/ipfs/go-qringbuf"
 )
 
@@ -28,21 +28,20 @@ type blockPostProcessResult struct {
 type seenBlocks map[[seenHashSize]byte]uniqueBlockStats
 type seenRoots map[[seenHashSize]byte][]byte
 
-func seenKey(b *block.Header) *[seenHashSize]byte {
+func seenKey(b *dgrblock.Header) (id *[seenHashSize]byte) {
 	if b == nil ||
-		b.IsInlined() ||
+		b.IsCidInlined() ||
 		b.DummyHashed() {
-		return nil
+		return
 	}
 
 	cid := b.Cid()
-	var id [seenHashSize]byte
+	id = new([seenHashSize]byte)
 	copy(
 		id[:],
 		cid[(len(cid)-seenHashSize):],
 	)
-
-	return &id
+	return
 }
 
 type statSummary struct {
@@ -56,8 +55,6 @@ type statSummary struct {
 	Roots    []rootStats  `json:"roots,omitempty"`
 	Layers   []layerStats `json:"layers,omitempty"`
 	SysStats struct {
-		ArgvExpanded []string `json:"argvExpanded"`
-		ArgvInitial  []string `json:"argvInitial"`
 		qringbuf.Stats
 		ElapsedNsecs int64 `json:"elapsedNanoseconds"`
 
@@ -74,9 +71,11 @@ type statSummary struct {
 		CtxSwForced  int64 `json:"contextSwitchForced"`
 
 		// for context
-		PageSize  int    `json:"pageSize"`
-		NumCPU    int    `json:"cpuCount"`
-		GoVersion string `json:"goVersion"`
+		ArgvExpanded []string `json:"argvExpanded"`
+		ArgvInitial  []string `json:"argvInitial"`
+		PageSize     int      `json:"pageSize"`
+		NumCPU       int      `json:"cpuCount"`
+		GoVersion    string   `json:"goVersion"`
 	} `json:"sys"`
 }
 type layerStats struct {
@@ -104,11 +103,7 @@ type uniqueBlockStats struct {
 	seenAt    seenTimesAt
 	*blockPostProcessResult
 }
-type generatedBy struct {
-	generatorIndex int
-	localLayer     int
-}
-type seenTimesAt map[generatedBy]int64
+type seenTimesAt map[dgrencoder.NodeOrigin]int64
 
 func (dgr *Dagger) OutputSummary() {
 
@@ -121,7 +116,7 @@ func (dgr *Dagger) OutputSummary() {
 	var totalUCount, totalUWeight, leafUWeight, leafUCount, sparseUWeight, sparseUCount int64
 
 	if dgr.seenBlocks != nil && len(dgr.seenBlocks) > 0 {
-		layers := make(map[generatedBy]*layerStats, 10) // if more than 10 layers - something odd is going on
+		layers := make(map[dgrencoder.NodeOrigin]*layerStats, 10) // if more than 10 layers - something odd is going on
 
 		for sk, b := range dgr.seenBlocks {
 			totalUCount++
@@ -129,7 +124,7 @@ func (dgr *Dagger) OutputSummary() {
 
 			// An identical block could be emitted by multiple generators ( e.g. trickle could )
 			// Take the lowest-sorting one
-			gens := make([]generatedBy, 0, len(b.seenAt))
+			gens := make([]dgrencoder.NodeOrigin, 0, len(b.seenAt))
 			for g := range b.seenAt {
 				gens = append(gens, g)
 			}
@@ -153,7 +148,7 @@ func (dgr *Dagger) OutputSummary() {
 			}
 		}
 
-		genInOrder := make([]generatedBy, 0, len(layers))
+		genInOrder := make([]dgrencoder.NodeOrigin, 0, len(layers))
 		for g := range layers {
 			genInOrder = append(genInOrder, g)
 		}
@@ -161,8 +156,8 @@ func (dgr *Dagger) OutputSummary() {
 
 		for i, g := range genInOrder {
 
-			if g.generatorIndex == 0 {
-				if g.localLayer == 0 {
+			if g.OriginatorIndex == -1 {
+				if g.LocalSubLayer == 0 {
 					layers[g].LongLabel = "DataBlocks"
 					layers[g].label = "DB"
 					for s, c := range layers[g].countTracker {
@@ -193,7 +188,7 @@ func (dgr *Dagger) OutputSummary() {
 		}
 	}
 
-	if statsJosnlOut := dgr.cfg.emitters[emStatsJsonl]; statsJosnlOut != nil {
+	if statsJsonlOut := dgr.cfg.emitters[emStatsJsonl]; statsJsonlOut != nil {
 		// emit the JSON last, so that piping to e.g. `jq` works nicer
 		defer func() {
 
@@ -205,12 +200,12 @@ func (dgr *Dagger) OutputSummary() {
 				smr.Roots = []rootStats{}
 			}
 
-			json, err := json.Marshal(smr)
+			jsonl, err := json.Marshal(smr)
 			if err != nil {
-				log.Fatalf("Encoding stats-jsonl failed: %s", err)
+				log.Fatalf("Encoding '%s' failed: %s", emStatsJsonl, err)
 			}
 
-			if _, err := fmt.Fprintf(statsJosnlOut, "%s\n", json); err != nil {
+			if _, err := fmt.Fprintf(statsJsonlOut, "%s\n", jsonl); err != nil {
 				log.Fatalf("Emitting '%s' failed: %s", emStatsJsonl, err)
 			}
 		}()
@@ -314,13 +309,13 @@ func (dgr *Dagger) OutputSummary() {
 	writeTextOutf("%s\n", strings.Join(descParts, ""))
 }
 
-func sortGenerators(g []generatedBy) {
+func sortGenerators(g []dgrencoder.NodeOrigin) {
 	if len(g) > 1 {
 		sort.Slice(g, func(i, j int) bool {
-			if g[i].generatorIndex != g[j].generatorIndex {
-				return g[i].generatorIndex > g[j].generatorIndex
+			if g[i].OriginatorIndex != g[j].OriginatorIndex {
+				return g[i].OriginatorIndex > g[j].OriginatorIndex
 			}
-			return g[i].localLayer > g[j].localLayer
+			return g[i].LocalSubLayer > g[j].LocalSubLayer
 		})
 	}
 }

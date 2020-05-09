@@ -14,7 +14,7 @@ build:
 
 	go build \
 		--trimpath "-ldflags=all=$(DAGLD_STRIP)" \
-		-o bin/stream-dagger ./cmd/stream-dagger
+		-o bin/ ./cmd/...
 
 	go build \
 		$(NOSANCHECKS) \

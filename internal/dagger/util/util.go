@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math/bits"
 	"os"
 	"reflect"
 	"regexp"
@@ -11,19 +12,36 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	getopt "github.com/pborman/getopt/v2"
 )
 
-type PanicfWrapper func(panicfFormat string, panicfArgs ...interface{})
-
-var InternalPanicf = func(format string, args ...interface{}) {
-	if len(args) > 0 {
-		log.Panicf(format, args)
+func VarintWireSize(v uint64) int {
+	if constants.PerformSanityChecks && v >= 1<<63 {
+		log.Panicf("Value %#v too large for a varint: https://github.com/multiformats/unsigned-varint#practical-maximum-of-9-bytes-for-security", v)
 	}
-	log.Panic(format)
+
+	if v == 0 {
+		return 1
+	}
+
+	return (bits.Len64(v) + 6) / 7
+}
+func VarintSlice(v uint64) []byte {
+	return AppendVarint(
+		make([]byte, 0, VarintWireSize(v)),
+		v,
+	)
+}
+func AppendVarint(tgt []byte, v uint64) []byte {
+	for v > 127 {
+		tgt = append(tgt, byte(v|128))
+		v >>= 7
+	}
+	return append(tgt, byte(v))
 }
 
-var CheckGoroutineCount bool
+var CheckGoroutineShutdown bool
 
 var ProfileStartStop func() func()
 
@@ -109,7 +127,7 @@ func SubHelp(description string, optSet *getopt.Set) (sh []string) {
 	b := bytes.NewBuffer(make([]byte, 0, 1024))
 	optSet.PrintOptions(b)
 
-	sh = append(sh, "    ::SubOptions::")
+	sh = append(sh, "  ------------\n   SubOptions")
 	sh = append(sh,
 		string(dashStripper.ReplaceAll(
 			nonOptIndenter.ReplaceAll(

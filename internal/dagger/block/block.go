@@ -1,9 +1,10 @@
-package block
+package dgrblock
 
 import (
 	"encoding/base32"
 	"fmt"
 	"hash"
+	"log"
 	"sync/atomic"
 
 	blake2b "github.com/minio/blake2b-simd"
@@ -12,8 +13,7 @@ import (
 	"golang.org/x/crypto/sha3"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
-	"github.com/ipfs-shipyard/DAGger/constants"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/enc"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	"github.com/ipfs-shipyard/DAGger/internal/zcpstring"
 )
@@ -54,17 +54,17 @@ const (
 	CodecPB  uint = 0x70
 
 	// encodes as CID of "baaaaaanohasha"...
-	dummyPrefix string = "\x00\x00\x00\x01\xAE\x38\x24\x70"
+	dummyPrefix = "\x00\x00\x00\x01\xAE\x38\x24\x70"
 )
 
 type Header struct {
 	// Everything in this struct needs to be "cacheable"
 	// That is no data that changes without a panic can be present
 	// ( e.g. stuff like "how many times was block seen in dag" is out )
+	dummyHashed      bool
+	isCidInlined     bool
 	sizeBlock        int
 	sizeLinkSection  int
-	isInlined        bool
-	dummyHashed      bool
 	totalSizePayload uint64
 	totalSizeDag     uint64
 	cid              []byte
@@ -78,14 +78,14 @@ func (h *Header) Content() (c *zcpstring.ZcpString) {
 	c = h.content
 	if constants.PerformSanityChecks &&
 		atomic.LoadInt32(h.contentGone) != 0 {
-		util.InternalPanicf("block content no longer available")
+		log.Panic("block content no longer available")
 	}
 	return
 }
 func (h *Header) EvictContent() {
 	if constants.PerformSanityChecks &&
 		atomic.AddInt32(h.contentGone, 1) != 1 {
-		util.InternalPanicf("block content no longer available")
+		log.Panic("block content already evicted")
 	}
 	h.content = nil
 }
@@ -97,7 +97,7 @@ func (h *Header) Cid() []byte {
 		(h.cid[0] != byte(1) ||
 			(len(h.cid) < 4) ||
 			(h.cid[2] != byte(0) && len(h.cid) < 4+(128/8))) {
-		util.InternalPanicf(
+		log.Panicf(
 			"block header with a seemingly invalid CID '%x' encountered",
 			h.cid,
 		)
@@ -107,7 +107,7 @@ func (h *Header) Cid() []byte {
 }
 func (h *Header) SizeBlock() int                { return h.sizeBlock }
 func (h *Header) SizeLinkSection() int          { return h.sizeLinkSection }
-func (h *Header) IsInlined() bool               { return h.isInlined }
+func (h *Header) IsCidInlined() bool            { return h.isCidInlined }
 func (h *Header) DummyHashed() bool             { return h.dummyHashed }
 func (h *Header) SizeCumulativeDag() uint64     { return h.totalSizeDag }
 func (h *Header) SizeCumulativePayload() uint64 { return h.totalSizePayload }
@@ -121,18 +121,8 @@ type Maker func(
 ) *Header
 
 type LeafSource struct {
-	chunker.Chunk // critically *NOT* a reference, so that DataSource{} is usable on its own
+	chunker.Chunk // critically *NOT* a reference, so that an empty LeafSource{} is usable on its own
 	Content       *zcpstring.ZcpString
-}
-
-func RawDataLeaf(ls LeafSource, bm Maker) *Header {
-	return bm(
-		ls.Content,
-		CodecRaw,
-		uint64(ls.Size),
-		0,
-		0,
-	)
 }
 
 var b32Encoder *base32.Encoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
@@ -146,7 +136,7 @@ func (h *Header) CidBase32() string {
 }
 
 func (h *Header) String() string {
-	if h.isInlined {
+	if h.isCidInlined {
 		return fmt.Sprintf(
 			"Identity-embedded %d bytes: %s",
 			h.sizeBlock,
@@ -158,10 +148,10 @@ func (h *Header) String() string {
 }
 
 type hashTask struct {
-	codecID uint
-	hdr     *Header
+	hashBasedCidLen int
+	hdr             *Header
 }
-type AsyncHashBus chan<- hashTask
+type AsyncHashingBus chan<- hashTask
 
 func MakerFromConfig(
 	hashAlg string,
@@ -173,11 +163,12 @@ func MakerFromConfig(
 
 	hashopts, found := AvailableHashers[hashAlg]
 	if !found {
-		return nil, nil, fmt.Sprintf(
-			"invalid hashing algorithm '%s'. Available hash algorithms are %s",
+		errString = fmt.Sprintf(
+			"invalid hash function '%s'. Available hash names are %s",
 			hashAlg,
 			util.AvailableMapKeys(AvailableHashers),
 		)
+		return
 	}
 
 	if hashopts.hasherMaker == nil {
@@ -187,18 +178,20 @@ func MakerFromConfig(
 	}
 
 	if nativeHashSize < cidHashSize {
-		return nil, nil, fmt.Sprintf(
-			"selected hash algorithm '%s' does not produce a digest satisfying the requested hash bits '%d'",
+		errString = fmt.Sprintf(
+			"selected hash function '%s' does not produce a digest satisfying the requested amount of --hash-bits '%d'",
 			hashAlg,
 			cidHashSize*8,
 		)
+		return
 	}
 
 	if maxAsyncHashers < 0 {
-		return nil, nil, fmt.Sprintf(
+		errString = fmt.Sprintf(
 			"invalid negative value '%d' for maxAsyncHashers",
 			maxAsyncHashers,
 		)
+		return
 	}
 
 	type codecMeta struct {
@@ -235,7 +228,7 @@ func MakerFromConfig(
 						}
 						hasher.Reset()
 						task.hdr.Content().WriteTo(hasher)
-						task.hdr.cid = (hasher.Sum(task.hdr.cid))[:codecs[task.codecID].hashedCidLength]
+						task.hdr.cid = (hasher.Sum(task.hdr.cid))[0:task.hashBasedCidLen:task.hashBasedCidLen]
 						close(task.hdr.cidReady)
 					}
 				}()
@@ -256,15 +249,15 @@ func MakerFromConfig(
 		}
 
 		if constants.PerformSanityChecks && blockContent.Size() > int(constants.HardMaxBlockSize) {
-			util.InternalPanicf(
-				"size of supplied block (%s) exceeds the hard maximum block size (%s)",
+			log.Panicf(
+				"size of supplied block %s exceeds the hard maximum block size %s",
 				util.Commify(blockContent.Size()),
 				util.Commify64(int64(constants.HardMaxBlockSize)),
 			)
 		}
 
 		if constants.PerformSanityChecks && codecID > 127 {
-			util.InternalPanicf(
+			log.Panicf(
 				"codec IDs larger than 127 are not supported, however %d was supplied",
 				codecID,
 			)
@@ -273,17 +266,17 @@ func MakerFromConfig(
 			// inefficiency is a-ok
 
 			codecs[codecID].identityCidPrefix = append(codecs[codecID].identityCidPrefix, byte(1))
-			codecs[codecID].identityCidPrefix = enc.AppendVarint(codecs[codecID].identityCidPrefix, uint64(codecID))
+			codecs[codecID].identityCidPrefix = util.AppendVarint(codecs[codecID].identityCidPrefix, uint64(codecID))
 			codecs[codecID].identityCidPrefix = append(codecs[codecID].identityCidPrefix, byte(0))
 
 			codecs[codecID].hashedCidPrefix = append(codecs[codecID].hashedCidPrefix, byte(1))
-			codecs[codecID].hashedCidPrefix = enc.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(codecID))
-			codecs[codecID].hashedCidPrefix = enc.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(hashopts.multihashID))
-			codecs[codecID].hashedCidPrefix = enc.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(cidHashSize))
+			codecs[codecID].hashedCidPrefix = util.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(codecID))
+			codecs[codecID].hashedCidPrefix = util.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(hashopts.multihashID))
+			codecs[codecID].hashedCidPrefix = util.AppendVarint(codecs[codecID].hashedCidPrefix, uint64(cidHashSize))
 
 			codecs[codecID].hashedCidLength = len(codecs[codecID].hashedCidPrefix) + cidHashSize
 
-			// this is what we assign in case the null hasher is selected
+			// this is what we assign in case the nul hasher is selected
 			codecs[codecID].dummyCid = make(
 				[]byte,
 				codecs[codecID].hashedCidLength,
@@ -297,24 +290,26 @@ func MakerFromConfig(
 			cidReady:         cidPreMadeChan,
 			sizeBlock:        blockContent.Size(),
 			totalSizeDag:     sizeSubDag + uint64(blockContent.Size()),
-			totalSizePayload: sizeSubPayload, // at present there is no payload in links
+			totalSizePayload: sizeSubPayload, // at present there is no payload in link-nodes
 			sizeLinkSection:  sizeLinkSection,
 		}
 
 		if inlineMaxSize > 0 &&
 			inlineMaxSize >= hdr.sizeBlock {
 
-			hdr.isInlined = true
+			hdr.isCidInlined = true
 
 			hdr.cid = append(
 				make(
 					[]byte,
 					0,
-					(len(codecs[codecID].identityCidPrefix)+enc.VarintMaxWireBytes+blockContent.Size()),
+					(len(codecs[codecID].identityCidPrefix)+
+						util.VarintWireSize(uint64(hdr.sizeBlock))+
+						blockContent.Size()),
 				),
 				codecs[codecID].identityCidPrefix...,
 			)
-			hdr.cid = enc.AppendVarint(hdr.cid, uint64(hdr.sizeBlock))
+			hdr.cid = util.AppendVarint(hdr.cid, uint64(hdr.sizeBlock))
 			hdr.cid = blockContent.AppendTo(hdr.cid)
 
 		} else if hashopts.hasherMaker == nil {
@@ -331,13 +326,18 @@ func MakerFromConfig(
 				codecs[codecID].hashedCidPrefix...,
 			)
 
+			finLen := codecs[codecID].hashedCidLength
+
 			if asyncHashQueue == nil {
 				standaloneHasher.Reset()
 				blockContent.WriteTo(standaloneHasher)
-				hdr.cid = (standaloneHasher.Sum(hdr.cid))[:codecs[codecID].hashedCidLength]
+				hdr.cid = (standaloneHasher.Sum(hdr.cid))[0:finLen:finLen]
 			} else {
 				hdr.cidReady = make(chan struct{})
-				asyncHashQueue <- hashTask{codecID, hdr}
+				asyncHashQueue <- hashTask{
+					hashBasedCidLen: finLen,
+					hdr:             hdr,
+				}
 			}
 		}
 

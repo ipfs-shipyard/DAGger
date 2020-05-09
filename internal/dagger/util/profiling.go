@@ -83,7 +83,7 @@ func openProfHandle(profName string, pathPrefix string, openHandles *[]*os.File)
 		)
 	}
 
-	// if we managed to open it - we also link it right away
+	// if we managed to open it - we also symlink it right away
 	os.Symlink(
 		filepath.Base(fh.Name()),
 		fh.Name()+".templnk",

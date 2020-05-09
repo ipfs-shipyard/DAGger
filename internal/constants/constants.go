@@ -7,7 +7,7 @@ import (
 
 const (
 	// hard limit for any block on-wire size in bytes
-	// the 32 is explicit - many assumptions we won't cross over
+	// the 32 is explicit - many network-inherent assumptions that we won't cross over
 	HardMaxBlockSize int32 = 2 * 1024 * 1024
 
 	// SANCHECK - will almost certainly need to be updated for CBOR ( whichever ends up providing less available space )

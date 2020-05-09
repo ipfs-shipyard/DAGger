@@ -3,5 +3,5 @@
 package util
 
 func init() {
-	CheckGoroutineCount = true
+	CheckGoroutineShutdown = true
 }

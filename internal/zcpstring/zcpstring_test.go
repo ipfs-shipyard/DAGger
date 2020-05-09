@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ipfs-shipyard/DAGger/constants"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	"github.com/ipfs-shipyard/DAGger/maint/src/testhelpers"
 )
 

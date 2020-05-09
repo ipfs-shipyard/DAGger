@@ -10,23 +10,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
-	getopt "github.com/pborman/getopt/v2"
-	"github.com/pborman/options"
-
-	"github.com/ipfs-shipyard/DAGger/constants"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
+	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
 
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/buzhash"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/fixedsize"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/padfinder"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/pigz"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/rabin"
 
-	dgrlinker "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/fixedoutdegree"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/linker/trickle"
+	dgrcollector "github.com/ipfs-shipyard/DAGger/internal/dagger/collector"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/fixedlinksectionsize"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/fixedoutdegree"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/nul"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/subbalancer"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/trickle"
+
+	dgrencoder "github.com/ipfs-shipyard/DAGger/internal/dagger/encoder"
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/encoder/unixfsv1"
+
+	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
+	getopt "github.com/pborman/getopt/v2"
+	"github.com/pborman/options"
 )
 
 var availableChunkers = map[string]dgrchunker.Initializer{
@@ -34,12 +42,20 @@ var availableChunkers = map[string]dgrchunker.Initializer{
 	"fixed-size": fixedsize.NewChunker,
 	"buzhash":    buzhash.NewChunker,
 	"rabin":      rabin.NewChunker,
+	"pigz":       pigz.NewChunker,
 }
-var availableLinkers = map[string]dgrlinker.Initializer{
-	"ipfs-fixed-outdegree": fixedoutdegree.NewLinker,
-	"ipfs-trickle":         trickle.NewLinker,
-	"none":                 dgrlinker.NewNulLinker,
+var availableCollectors = map[string]dgrcollector.Initializer{
+	"fixed-linksection-size": fixedlinksectionsize.NewCollector,
+	"fixed-outdegree":        fixedoutdegree.NewCollector,
+	"trickle":                trickle.NewCollector,
+	"sub-balancer":           subbalancer.NewCollector,
+	"none":                   nul.NewCollector,
 }
+var availableNodeEncoders = map[string]dgrencoder.Initializer{
+	"unixfsv1": unixfsv1.NewEncoder,
+}
+
+type emissionTargets map[string]io.WriteCloser
 
 const (
 	emNone                = "none"
@@ -47,8 +63,8 @@ const (
 	emStatsJsonl          = "stats-jsonl"
 	emRootsJsonl          = "roots-jsonl"
 	emChunksJsonl         = "chunks-jsonl"
-	emCarV0Fifos          = "carV0-fifos"
-	emCarV0RootlessStream = "carV0-rootless-stream"
+	emCarV0Fifos          = "car-v0-fifos"
+	emCarV0RootlessStream = "car-v0-rootless-stream"
 )
 
 // where the CLI initial error messages go
@@ -60,25 +76,22 @@ type config struct {
 	// where to output
 	emitters map[string]io.WriteCloser
 
-	// speederization shortcut flags for internal logic
-	generateRoots bool
-	emitChunks    bool
-
 	//
-	// Bulk of CLI options definition starts here, the rest further down in setupArgvParser()
+	// Bulk of CLI options definition starts here, the rest further down in initArgvParser()
 	//
 
 	Help             bool `getopt:"-h --help             Display basic help"`
-	HelpAll          bool `getopt:"--help-all            Display help including options of individual plugins"`
+	HelpAll          bool `getopt:"--help-all            Display full help including options for every currently supported chunker/collector/encoder"`
 	MultipartStream  bool `getopt:"--multipart           Expect multiple SInt64BE-size-prefixed streams on stdIN"`
-	ProcessNulInputs bool `getopt:"--process-nul-inputs  Instead of skipping zero-length streams, emit a proper zero-length CID based on other settings"`
+	ProcessNulInputs bool `getopt:"--process-nul-inputs  Instead of skipping zero-length streams, emit a proper zero-length CID based on current settings"`
 
-	emittersStdErr []string // Emitter spec: option/helptext in setupArgvParser
-	emittersStdOut []string // Emitter spec: option/helptext in setupArgvParser
+	emittersStdErr []string // Emitter spec: option/helptext in initArgvParser()
+	emittersStdOut []string // Emitter spec: option/helptext in initArgvParser()
 
 	// no-option-attached, parsing error accumulators
-	erroredChunkers []string
-	erroredLinkers  []string
+	erroredChunkers     []string
+	erroredCollectors   []string
+	erroredNodeEncoders []string
 
 	// 34 bytes is the largest identity CID that fits in 63 chars (dns limit) of b-prefixed base32 encoding
 	InlineMaxSize      int `getopt:"--inline-max-size          Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
@@ -88,13 +101,14 @@ type config struct {
 	RingBufferSectSize int `getopt:"--ring-buffer-sync-size    (EXPERT SETTING) The size of each buffer synchronization sector. Default:"` // option vaguely named 'sync' to not confuse users
 	RingBufferMinRead  int `getopt:"--ring-buffer-min-sysread  (EXPERT SETTING) Perform next read(2) only when the specified amount of free space is available in the buffer. Default:"`
 
-	StatsEnabled int `getopt:"--stats-enabled  An integer representing enabled stat aggregations: bit0:Blocks, bit1:RingbufferTiming. Default:"`
+	StatsActive int `getopt:"--stats-active  An integer representing enabled stat aggregations: bit0:BlockSizing, bit1:RingbufferTiming. Default:"`
 
-	HashBits int    `getopt:"--hash-bits Amount of bits taken from *start* of the hash output"`
-	hashAlg  string // hash algorithm to use: option/helptext in setupArgvParser
+	HashBits int    `getopt:"--hash-bits Amount of bits taken from *start* of the hash output. Default:"`
+	hashFunc string // hash function to use: option/helptext in initArgvParser()
 
-	requestedChunkers string // Chunker chain: option/helptext in setupArgvParser
-	requestedLinkers  string // Linker chain: option/helptext in setupArgvParser
+	requestedChunkers    string // Chunker chain: option/helptext in initArgvParser()
+	requestedCollectors  string // Collector chain: option/helptext in initArgvParser()
+	requestedNodeEncoder string // The global (for now) node => block encoder: option/helptext in initArgvParser
 
 	IpfsCompatCmd string `getopt:"--ipfs-add-compatible-command A complete go-ipfs/js-ipfs add command serving as a basis config (any conflicting option will take precedence)"`
 }
@@ -104,17 +118,40 @@ const (
 	statsRingbuf
 )
 
-func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
+func (dgr *Dagger) Destroy() {
+	dgr.mu.Lock()
+	if dgr.asyncHashingBus != nil {
+		wantCount := runtime.NumGoroutine() - dgr.cfg.AsyncHashers
+		close(dgr.asyncHashingBus)
+		dgr.asyncHashingBus = nil
 
-	// Some minimal non-controversial defaults, all overridable
-	// Try really hard to *NOT* have defaults that influence resulting CIDs
-	dgr := &Dagger{
+		if constants.PerformSanityChecks {
+			dgr.mu.Unlock()
+			// we will be checking for leaked goroutines - wait a bit for hashers to shut down
+			for {
+				time.Sleep(2 * time.Millisecond)
+				if runtime.NumGoroutine() <= wantCount {
+					break
+				}
+			}
+			dgr.mu.Lock()
+		}
+	}
+	dgr.qrb = nil
+	dgr.mu.Unlock()
+}
+
+func NewFromArgv(argv []string) (dgr *Dagger) {
+
+	dgr = &Dagger{
+		// Some minimal non-controversial defaults, all overridable
+		// Try really hard to *NOT* have defaults that influence resulting CIDs
 		cfg: config{
 			GlobalMaxChunkSize: 1024 * 1024,
 			HashBits:           256,
 			AsyncHashers:       runtime.NumCPU() * 4, // SANCHECK yes, this is high: seems the simd version knows what to do...
 
-			StatsEnabled: statsBlocks,
+			StatsActive: statsBlocks,
 
 			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 256*1024, // bare-minimum with defaults
 			RingBufferSize: 24 * 1024 * 1024, // SANCHECK low seems good somehow... fits in L3 maybe?
@@ -123,12 +160,11 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 			RingBufferMinRead:  256 * 1024,
 			RingBufferSectSize: 64 * 1024,
 
-			emittersStdOut:   []string{emRootsJsonl},
-			emittersStdErr:   []string{emStatsText},
-			requestedLinkers: "none",
+			emittersStdOut: []string{emRootsJsonl},
+			emittersStdErr: []string{emStatsText},
 
 			// not defaults but rather the list of known/configured emitters
-			emitters: map[string]io.WriteCloser{
+			emitters: emissionTargets{
 				emNone:        nil,
 				emStatsText:   nil,
 				emStatsJsonl:  nil,
@@ -161,7 +197,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		os.Exit(0)
 	}
 
-	// accumulator for multiple erros, to present to the user all at once
+	// accumulator for multiple errors, to present to the user all at once
 	var argErrs []string
 
 	unexpectedArgs := cfg.optSet.Args()
@@ -176,6 +212,14 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 	if cfg.optSet.IsSet("ipfs-add-compatible-command") {
 		if errStrings := cfg.presetFromIPFS(); len(errStrings) > 0 {
 			argErrs = append(argErrs, errStrings...)
+		}
+	}
+
+	// "invisible" set of defaults (not printed during --help)
+	if cfg.requestedCollectors == "" && !cfg.optSet.IsSet("collectors") {
+		cfg.requestedCollectors = "none"
+		if cfg.requestedNodeEncoder == "" && !cfg.optSet.IsSet("node-encoder") {
+			cfg.requestedNodeEncoder = "unixfsv1"
 		}
 	}
 
@@ -195,7 +239,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 
 	if !cfg.optSet.IsSet("inline-max-size") &&
 		!cfg.optSet.IsSet("ipfs-add-compatible-command") &&
-		cfg.requestedLinkers != "none" {
+		cfg.requestedCollectors != "none" {
 		argErrs = append(argErrs, "You must specify a valid value for --inline-max-size")
 	} else if cfg.InlineMaxSize < 0 ||
 		(cfg.InlineMaxSize > 0 && cfg.InlineMaxSize < 4) ||
@@ -207,76 +251,22 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		))
 	}
 
-	var blockMaker block.Maker
-
-	if _, exists := block.AvailableHashers[cfg.hashAlg]; !exists {
-		argErrs = append(argErrs, fmt.Sprintf(
-			"You must specify a valid hashing algorithm via '--hash=algname'. Available hash algorithms are %s",
-			util.AvailableMapKeys(block.AvailableHashers),
-		))
-	} else {
-
-		if cfg.hashAlg == "none" && !cfg.optSet.IsSet("async-hashers") {
-			cfg.AsyncHashers = 0
-		}
-
-		var errStr string
-		blockMaker, dgr.asyncHasherBus, errStr = block.MakerFromConfig(
-			cfg.hashAlg,
-			cfg.HashBits/8,
-			cfg.InlineMaxSize,
-			cfg.AsyncHashers,
-		)
-		if errStr != "" {
-			argErrs = append(argErrs, errStr)
-		}
-	}
-
-	if errorStrings := cfg.parseEmitterSpecs(); len(errorStrings) > 0 {
-		argErrs = append(argErrs, errorStrings...)
-	} else {
-		// setup fifo callback if needed
-		for _, carType := range []string{
-			emCarV0Fifos,
-			emCarV0RootlessStream,
-		} {
-			if cfg.emitters[carType] != nil {
-
-				if (dgr.cfg.StatsEnabled & statsBlocks) != statsBlocks {
-					argErrs = append(argErrs, fmt.Sprintf(
-						"disabled blockstat collection required by emitter '%s'",
-						carType,
-					))
-					break
-				}
-
-				dgr.uniqueBlockCallback = func(hdr *block.Header) *blockPostProcessResult {
-					util.InternalPanicf("car writing not yet implemented") // FIXME
-					return &blockPostProcessResult{}
-				}
-			}
-		}
-	}
-
 	var errorMessages []string
 
-	if cfg.requestedChunkers == "" {
-		argErrs = append(argErrs,
-			"You must specify at least one stream chunker via '--chunkers=algname1_opt1_opt2__algname2_...'. Available chunker names are: "+
-				util.AvailableMapKeys(availableChunkers),
-		)
-	} else if errorMessages, cfg.erroredChunkers = dgr.setupChunkerChain(); len(errorMessages) > 0 {
-		argErrs = append(argErrs, errorMessages...)
-	}
+	// Parses/creates the blockmaker/nodeencoder, to pass in turn to the collector chain
+	// Not stored in the dgr object itself, to cut down on logic leaks
+	var nodeEnc dgrencoder.NodeEncoder
+	nodeEnc, errorMessages = dgr.setupEncoding()
+	argErrs = append(argErrs, errorMessages...)
 
-	if cfg.optSet.IsSet("linkers") && cfg.requestedLinkers == "" {
-		argErrs = append(argErrs,
-			"When specified linker chain must be in the form '--linkers=algname1_opt1_opt2__algname2_...'. Available linker names are: "+
-				util.AvailableMapKeys(availableLinkers),
-		)
-	} else if errorMessages, cfg.erroredLinkers = dgr.setupLinkerChain(blockMaker); len(errorMessages) > 0 {
-		argErrs = append(argErrs, errorMessages...)
-	}
+	errorMessages = dgr.setupCollectorChain(nodeEnc)
+	argErrs = append(argErrs, errorMessages...)
+
+	errorMessages = dgr.setupChunkerChain()
+	argErrs = append(argErrs, errorMessages...)
+
+	errorMessages = dgr.setupEmitters()
+	argErrs = append(argErrs, errorMessages...)
 
 	if len(argErrs) != 0 {
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
@@ -291,7 +281,7 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 		os.Exit(1)
 	}
 
-	// Opts are good - populate what we ended up with
+	// Opts check out - take a snapshot of what we ended up with
 	cfg.optSet.VisitAll(func(o getopt.Option) {
 		switch o.LongName() {
 		case "help", "help-all", "ipfs-add-compatible-command":
@@ -307,22 +297,17 @@ func NewFromArgv(argv []string) (*Dagger, util.PanicfWrapper) {
 	})
 	sort.Strings(dgr.statSummary.SysStats.ArgvExpanded)
 
-	// panic with better stream-position context ( where possible )
-	return dgr, func(f string, a ...interface{}) {
-		prefix := fmt.Sprintf("INTERNAL ERROR\tstream:%d\tpos:%d\n======================\n",
-			dgr.statSummary.Streams, dgr.curStreamOffset,
-		)
-		panic(fmt.Sprintf(prefix+f, a...))
-	}
+	return
 }
 
 func (cfg *config) printUsage() {
 	cfg.optSet.PrintUsage(argParseErrOut)
-	if cfg.HelpAll || len(cfg.erroredChunkers) > 0 || len(cfg.erroredLinkers) > 0 {
+	if cfg.HelpAll || len(cfg.erroredChunkers) > 0 || len(cfg.erroredCollectors) > 0 {
 		printPluginUsage(
 			argParseErrOut,
+			cfg.erroredCollectors,
+			cfg.erroredNodeEncoders,
 			cfg.erroredChunkers,
-			cfg.erroredLinkers,
 		)
 	} else {
 		fmt.Fprint(argParseErrOut, "\nTry --help-all for more info\n\n")
@@ -331,34 +316,58 @@ func (cfg *config) printUsage() {
 
 func printPluginUsage(
 	out io.Writer,
+	listCollectors []string,
+	listNodeEncoders []string,
 	listChunkers []string,
-	listLinkers []string,
 ) {
 
 	// if nothing was requested explicitly - list everything
-	if len(listChunkers) == 0 && len(listLinkers) == 0 {
+	if len(listCollectors) == 0 && len(listNodeEncoders) == 0 && len(listChunkers) == 0 {
+		for name, initializer := range availableCollectors {
+			if initializer != nil {
+				listCollectors = append(listCollectors, name)
+			}
+		}
+		for name, initializer := range availableNodeEncoders {
+			if initializer != nil {
+				listNodeEncoders = append(listNodeEncoders, name)
+			}
+		}
 		for name, initializer := range availableChunkers {
 			if initializer != nil {
 				listChunkers = append(listChunkers, name)
 			}
 		}
-		for name, initializer := range availableLinkers {
-			if initializer != nil {
-				listLinkers = append(listLinkers, name)
+	}
+
+	if len(listCollectors) != 0 {
+		fmt.Fprint(out, "\n")
+		sort.Strings(listCollectors)
+		for _, name := range listCollectors {
+			fmt.Fprintf(
+				out,
+				"[C]ollector '%s'\n",
+				name,
+			)
+			_, h := availableCollectors[name](nil, nil)
+			if len(h) == 0 {
+				fmt.Fprint(out, "  -- no helptext available --\n\n")
+			} else {
+				fmt.Fprintln(out, strings.Join(h, "\n"))
 			}
 		}
 	}
 
-	if len(listLinkers) != 0 {
+	if len(listNodeEncoders) != 0 {
 		fmt.Fprint(out, "\n")
-		sort.Strings(listLinkers)
-		for _, name := range listLinkers {
+		sort.Strings(listNodeEncoders)
+		for _, name := range listNodeEncoders {
 			fmt.Fprintf(
 				out,
-				"[L]inker '%s'\n",
+				"[N]odeEncoder '%s'\n",
 				name,
 			)
-			_, h := availableLinkers[name](nil, nil)
+			_, h := availableNodeEncoders[name](nil, nil)
 			if len(h) == 0 {
 				fmt.Fprint(out, "  -- no helptext available --\n\n")
 			} else {
@@ -393,7 +402,7 @@ func (cfg *config) initArgvParser() {
 	// Operate over objects instead, allowing us to re-parse argv multiple times
 	o := getopt.New()
 	if err := options.RegisterSet("", cfg, o); err != nil {
-		log.Fatalf("Option set registration failed: %s", err)
+		log.Fatalf("option set registration failed: %s", err)
 	}
 	cfg.optSet = o
 
@@ -401,15 +410,20 @@ func (cfg *config) initArgvParser() {
 	// need to override this for sensible help render
 	o.SetParameters("")
 
-	// Several options have the help assembled programmatically
-	o.FlagLong(&cfg.hashAlg, "hash", 0, "Hash algorithm to use, one of: "+util.AvailableMapKeys(block.AvailableHashers))
+	// Several options have the help-text assembled programmatically
+	o.FlagLong(&cfg.hashFunc, "hash", 0, "Hash function to use, one of: "+
+		util.AvailableMapKeys(dgrblock.AvailableHashers),
+	)
+	o.FlagLong(&cfg.requestedNodeEncoder, "node-encoder", 0, "The IPLD-ish node encoder to use, one of: "+util.AvailableMapKeys(availableNodeEncoders),
+		"'encname_opt1_opt2_..._optN",
+	)
 	o.FlagLong(&cfg.requestedChunkers, "chunkers", 0,
 		"Stream chunking algorithm chain. Each chunker is one of: "+util.AvailableMapKeys(availableChunkers),
 		"'ch1_o1.1_o1.2_..._o1.N__ch2_o2.1_o2.2_..._o2.N__ch3_...'",
 	)
-	o.FlagLong(&cfg.requestedLinkers, "linkers", 0,
-		"Block linking algorithm chain. Each linker is one of: "+util.AvailableMapKeys(availableLinkers),
-		"'ln1_o1.1_o1.2_..._o1.N__ln.2_...'",
+	o.FlagLong(&cfg.requestedCollectors, "collectors", 0,
+		"Node-forming algorithm chain. Each collector is one of: "+util.AvailableMapKeys(availableCollectors),
+		"'co1_o1.1_o1.2_..._o1.N__co2_...'",
 	)
 	o.FlagLong(&cfg.emittersStdErr, "emit-stderr", 0, fmt.Sprintf(
 		"One or more emitters to activate on stdERR. Available emitters are %s. Default: ",
@@ -421,31 +435,57 @@ func (cfg *config) initArgvParser() {
 	)
 }
 
-func (cfg *config) parseEmitterSpecs() (argErrs []string) {
-	activeStderr := make(map[string]bool, len(cfg.emittersStdErr))
-	for _, s := range cfg.emittersStdErr {
+func (dgr *Dagger) setupEmitters() (argErrs []string) {
+
+	// FIXME - car
+	// } else {
+	// 	// setup stream-out callback if needed
+	// 	for _, carType := range []string{
+	// 		emCarV0Fifos,
+	// 		emCarV0RootlessStream,
+	// 	} {
+	// 		if cfg.emitters[carType] != nil {
+
+	// 			if (dgr.cfg.StatsActive & statsBlocks) != statsBlocks {
+	// 				argErrs = append(argErrs, fmt.Sprintf(
+	// 					"disabling blockstat collection conflicts with selected emitter '%s'",
+	// 					carType,
+	// 				))
+	// 				break
+	// 			}
+
+	// 			dgr.uniqueBlockCallback = func(hdr *dgrblock.Header) *blockPostProcessResult {
+	// 				log.Panic("car writing not yet implemented") // FIXME
+	// 				return &blockPostProcessResult{}
+	// 			}
+	// 		}
+	// 	}
+	// }
+
+	activeStderr := make(map[string]bool, len(dgr.cfg.emittersStdErr))
+	for _, s := range dgr.cfg.emittersStdErr {
 		activeStderr[s] = true
-		if val, exists := cfg.emitters[s]; !exists {
+		if val, exists := dgr.cfg.emitters[s]; !exists {
 			argErrs = append(argErrs, fmt.Sprintf("Invalid emitter '%s' specified with --emit-stderr", s))
 		} else if s == emNone {
 			continue
 		} else if val != nil {
 			argErrs = append(argErrs, fmt.Sprintf("Emitter '%s' specified more than once", s))
 		} else {
-			cfg.emitters[s] = os.Stderr
+			dgr.cfg.emitters[s] = os.Stderr
 		}
 	}
-	activeStdout := make(map[string]bool, len(cfg.emittersStdOut))
-	for _, s := range cfg.emittersStdOut {
+	activeStdout := make(map[string]bool, len(dgr.cfg.emittersStdOut))
+	for _, s := range dgr.cfg.emittersStdOut {
 		activeStdout[s] = true
-		if val, exists := cfg.emitters[s]; !exists {
+		if val, exists := dgr.cfg.emitters[s]; !exists {
 			argErrs = append(argErrs, fmt.Sprintf("Invalid emitter '%s' specified for --emit-stdout", s))
 		} else if s == emNone {
 			continue
 		} else if val != nil {
 			argErrs = append(argErrs, fmt.Sprintf("Emitter '%s' specified more than once", s))
 		} else {
-			cfg.emitters[s] = os.Stdout
+			dgr.cfg.emitters[s] = os.Stdout
 		}
 	}
 
@@ -469,20 +509,104 @@ func (cfg *config) parseEmitterSpecs() (argErrs []string) {
 		}
 	}
 
-	// set shortcut defaults based on emitters
-	cfg.emitChunks = (cfg.emitters[emChunksJsonl] != nil)
-	cfg.generateRoots = (cfg.emitters[emRootsJsonl] != nil || cfg.emitters[emStatsJsonl] != nil)
+	// set couple shortcuts based on emitter config
+	dgr.emitChunks = (dgr.cfg.emitters[emChunksJsonl] != nil)
+	dgr.generateRoots = (dgr.cfg.emitters[emRootsJsonl] != nil || dgr.cfg.emitters[emStatsJsonl] != nil)
 
-	return argErrs
+	return
 }
 
-func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) {
-	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "__")
+// Parses/creates the blockmaker/nodeencoder, to pass in turn to the collector chain
+// Not stored in the dgr object itself, to cut down on logic leaks
+func (dgr *Dagger) setupEncoding() (nodeEnc dgrencoder.NodeEncoder, argErrs []string) {
 
+	cfg := dgr.cfg
+
+	var blockMaker dgrblock.Maker
+	if _, exists := dgrblock.AvailableHashers[cfg.hashFunc]; !exists {
+
+		argErrs = append(argErrs, fmt.Sprintf(
+			"You must specify a valid hash function via '--hash=algname'. Available hash names are %s",
+			util.AvailableMapKeys(dgrblock.AvailableHashers),
+		))
+	} else {
+
+		if cfg.hashFunc == "none" && !cfg.optSet.IsSet("async-hashers") {
+			cfg.AsyncHashers = 0
+		}
+
+		var errStr string
+		blockMaker, dgr.asyncHashingBus, errStr = dgrblock.MakerFromConfig(
+			cfg.hashFunc,
+			cfg.HashBits/8,
+			cfg.InlineMaxSize,
+			cfg.AsyncHashers,
+		)
+		if errStr != "" {
+			argErrs = append(argErrs, errStr)
+		}
+	}
+
+	nodeEncArgs := strings.Split(cfg.requestedNodeEncoder, "_")
+	if init, exists := availableNodeEncoders[nodeEncArgs[0]]; !exists {
+		argErrs = append(argErrs, fmt.Sprintf(
+			"Encoder '%s' not found. Available encoder names are: %s",
+			nodeEncArgs[0],
+			util.AvailableMapKeys(availableNodeEncoders),
+		))
+	} else {
+		for n := range nodeEncArgs {
+			if n > 0 {
+				nodeEncArgs[n] = "--" + nodeEncArgs[n]
+			}
+		}
+
+		var initErrors []string
+		if nodeEnc, initErrors = init(
+			nodeEncArgs,
+			&dgrencoder.DaggerConfig{
+				GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
+				BlockMaker:         blockMaker,
+				HasherName:         cfg.hashFunc,
+				HasherBits:         cfg.HashBits,
+				NewLinkBlockCallback: func(origin dgrencoder.NodeOrigin, newLinkHdr *dgrblock.Header, linkedBlocks []*dgrblock.Header) {
+					dgr.asyncWG.Add(1)
+					go dgr.registerNewBlock(
+						origin,
+						newLinkHdr,
+						nil, // a link-node has no data, for now at least
+					)
+				},
+			},
+		); len(initErrors) > 0 {
+			cfg.erroredNodeEncoders = append(cfg.erroredNodeEncoders, nodeEncArgs[0])
+			for _, e := range initErrors {
+				argErrs = append(argErrs, fmt.Sprintf(
+					"Initialization of node encoder '%s' failed: %s",
+					nodeEncArgs[0],
+					e,
+				))
+			}
+		}
+	}
+
+	return
+}
+
+func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
+
+	// bail early
+	if dgr.cfg.requestedChunkers == "" {
+		return []string{
+			"You must specify at least one stream chunker via '--chunkers=algname1_opt1_opt2__algname2_...'. Available chunker names are: " +
+				util.AvailableMapKeys(availableChunkers),
+		}
+	}
+
+	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "__")
 	commonCfg := dgrchunker.DaggerConfig{
 		LastChainIndex:     len(individualChunkers) - 1,
 		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
-		InternalPanicf:     util.InternalPanicf,
 	}
 
 	for chunkerNum, chunkerCmd := range individualChunkers {
@@ -511,7 +635,7 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 			&chunkerCfg,
 		); len(initErrors) > 0 {
 
-			initFailFor = append(initFailFor, chunkerArgs[0])
+			dgr.cfg.erroredChunkers = append(dgr.cfg.erroredChunkers, chunkerArgs[0])
 			for _, e := range initErrors {
 				argErrs = append(argErrs, fmt.Sprintf(
 					"Initialization of chunker '%s' failed: %s",
@@ -527,93 +651,83 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string, initFailFor []string) 
 		}
 	}
 
-	return argErrs, initFailFor
+	return
 }
 
-func (dgr *Dagger) setupLinkerChain(bm block.Maker) (argErrs []string, initFailFor []string) {
-	individualLinkers := strings.Split(dgr.cfg.requestedLinkers, "__")
+func (dgr *Dagger) setupCollectorChain(nodeEnc dgrencoder.NodeEncoder) (argErrs []string) {
 
-	commonCfg := dgrlinker.DaggerConfig{
-		LastChainIndex:     len(individualLinkers) - 1,
-		InternalPanicf:     util.InternalPanicf,
-		GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
-		BlockMaker:         bm,
-		HasherName:         dgr.cfg.hashAlg,
-		HasherBits:         dgr.cfg.HashBits,
+	// bail early
+	if dgr.cfg.optSet.IsSet("collectors") && dgr.cfg.requestedCollectors == "" {
+		return []string{
+			"When specified, collector chain must be in the form '--collectors=algname1_opt1_opt2__algname2_...'. Available collector names are: " +
+				util.AvailableMapKeys(availableCollectors),
+		}
 	}
 
-	dgr.chainedLinkers = make([]dgrlinker.Linker, len(individualLinkers))
-	// we need to process the linkers in reverse, in order to populate NextLinker
-	for linkerNum := len(individualLinkers) - 1; linkerNum >= 0; linkerNum-- {
+	commonCfg := dgrcollector.DaggerConfig{
+		NodeEncoder: nodeEnc,
+	}
 
-		linkerCmd := individualLinkers[linkerNum]
+	individualCollectors := strings.Split(dgr.cfg.requestedCollectors, "__")
 
-		linkerArgs := strings.Split(linkerCmd, "_")
-		init, exists := availableLinkers[linkerArgs[0]]
+	// we need to process the collectors in reverse, in order to populate NextCollector
+	dgr.chainedCollectors = make([]dgrcollector.Collector, len(individualCollectors))
+	for collectorNum := len(individualCollectors) - 1; collectorNum >= 0; collectorNum-- {
+
+		collectorCmd := individualCollectors[collectorNum]
+
+		collectorArgs := strings.Split(collectorCmd, "_")
+		init, exists := availableCollectors[collectorArgs[0]]
 		if !exists {
 			argErrs = append(argErrs, fmt.Sprintf(
-				"Linker '%s' not found. Available linker names are: %s",
-				linkerArgs[0],
-				util.AvailableMapKeys(availableLinkers),
+				"Collector '%s' not found. Available collector names are: %s",
+				collectorArgs[0],
+				util.AvailableMapKeys(availableCollectors),
 			))
 			continue
 		}
 
-		for n := range linkerArgs {
+		for n := range collectorArgs {
 			if n > 0 {
-				linkerArgs[n] = "--" + linkerArgs[n]
+				collectorArgs[n] = "--" + collectorArgs[n]
 			}
 		}
 
-		generatorIdx := len(individualLinkers) - linkerNum
-
-		linkerCfg := commonCfg // SHALLOW COPY!!!
-		linkerCfg.IndexInChain = linkerNum
-
-		// every linker gets a callback with their own index closed over
-		linkerCfg.NewLinkBlockCallback = func(hdr *block.Header, linkerLayer int, links []*block.Header) {
-			dgr.asyncWG.Add(1)
-			go dgr.registerNewBlock(
-				hdr,
-				generatedBy{generatorIdx, linkerLayer},
-				links,
-				nil, // a linkblock has no data, for now at least
-			)
+		collectorCfg := commonCfg // SHALLOW COPY!!!
+		collectorCfg.IndexInChain = collectorNum
+		if collectorNum != len(individualCollectors)-1 {
+			collectorCfg.NextCollector = dgr.chainedCollectors[collectorNum+1]
 		}
 
-		if linkerNum != len(individualLinkers)-1 {
-			linkerCfg.NextLinker = dgr.chainedLinkers[linkerNum+1]
-		}
-
-		if linkerInstance, initErrors := init(
-			linkerArgs,
-			&linkerCfg,
+		if collectorInstance, initErrors := init(
+			collectorArgs,
+			&collectorCfg,
 		); len(initErrors) > 0 {
 
-			initFailFor = append(initFailFor, linkerArgs[0])
+			dgr.cfg.erroredCollectors = append(dgr.cfg.erroredCollectors, collectorArgs[0])
 			for _, e := range initErrors {
 				argErrs = append(argErrs, fmt.Sprintf(
-					"Initialization of linker '%s' failed: %s",
-					linkerArgs[0],
+					"Initialization of collector '%s' failed: %s",
+					collectorArgs[0],
 					e,
 				))
 			}
 		} else {
-			dgr.chainedLinkers[linkerNum] = linkerInstance
+			dgr.chainedCollectors[collectorNum] = collectorInstance
 		}
 	}
 
-	return argErrs, initFailFor
+	return
 }
 
 type compatIpfsArgs struct {
-	CidVersion    int    `getopt:"--cid-version"`
-	InlineActive  bool   `getopt:"--inline"`
-	InlineLimit   int    `getopt:"--inline-limit"`
-	UseRawLeaves  bool   `getopt:"--raw-leaves"`
-	UpgradeV0CID  bool   `getopt:"--upgrade-cidv0-in-output"`
-	TrickleLinker bool   `getopt:"--trickle"`
-	Chunker       string `getopt:"--chunker"`
+	CidVersion       int    `getopt:"--cid-version"`
+	InlineActive     bool   `getopt:"--inline"`
+	InlineLimit      int    `getopt:"--inline-limit"`
+	UseRawLeaves     bool   `getopt:"--raw-leaves"`
+	UpgradeV0CID     bool   `getopt:"--upgrade-cidv0-in-output"`
+	TrickleCollector bool   `getopt:"--trickle"`
+	Chunker          string `getopt:"--chunker"`
 }
 
 func (cfg *config) presetFromIPFS() (parseErrors []string) {
@@ -646,7 +760,7 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 	}
 
 	if !cfg.optSet.IsSet("hash") {
-		cfg.hashAlg = "sha2-256"
+		cfg.hashFunc = "sha2-256"
 	}
 
 	if !cfg.optSet.IsSet("inline-max-size") {
@@ -661,37 +775,24 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 		}
 	}
 
-	// ignore everything compat if a linker is already given
-	if !cfg.optSet.IsSet("linkers") {
-
-		var linkerOpts []string
-
+	// ignore everything compat if a collector is already given
+	if !cfg.optSet.IsSet("collectors") {
 		// either trickle or fixed-outdegree, go-ipfs doesn't understand much else
-		if ipfsOpts.TrickleLinker {
-			linkerOpts = append(linkerOpts, "ipfs-trickle")
-			// mandatory defaults
-			linkerOpts = append(linkerOpts, "v0")
-			linkerOpts = append(linkerOpts, "max-direct-leaves=174")
-			linkerOpts = append(linkerOpts, "max-sibling-subgroups=4")
+		if ipfsOpts.TrickleCollector {
+			cfg.requestedCollectors = "trickle_max-direct-leaves=174_max-sibling-subgroups=4_unixfs-nul-leaf-compat"
 		} else {
-			linkerOpts = append(linkerOpts, "ipfs-fixed-outdegree")
-			// mandatory defaults
-			linkerOpts = append(linkerOpts, "v0")
-			linkerOpts = append(linkerOpts, "max-outdegree=174")
+			cfg.requestedCollectors = "fixed-outdegree_max-outdegree=174"
 		}
+	}
+
+	// ignore everything compat if an encoder is already given
+	if !cfg.optSet.IsSet("node-encoder") {
+
+		ufsv1EncoderOpts := []string{"unixfsv1", "merkledag-compat-protobuf"}
 
 		if ipfsOpts.CidVersion != 1 {
-
 			if ipfsOpts.UpgradeV0CID && ipfsOpts.CidVersion == 0 {
-
-				linkerOpts = append(linkerOpts, "cidv0")
-
-				if cfg.hashAlg != "sha2-256" || cfg.HashBits != 256 {
-					parseErrors = append(
-						parseErrors,
-						"Legacy --upgrade-cidv0-in-output requires --hash=sha2-256 and --hash-bits=256",
-					)
-				}
+				ufsv1EncoderOpts = append(ufsv1EncoderOpts, "cidv0")
 			} else {
 				parseErrors = append(
 					parseErrors,
@@ -703,10 +804,14 @@ func (cfg *config) presetFromIPFS() (parseErrors []string) {
 		}
 
 		if !ipfsOpts.UseRawLeaves {
-			linkerOpts = append(linkerOpts, "unixfs-leaves")
+			if ipfsOpts.TrickleCollector {
+				ufsv1EncoderOpts = append(ufsv1EncoderOpts, "unixfs-leaf-decorator-type=0")
+			} else {
+				ufsv1EncoderOpts = append(ufsv1EncoderOpts, "unixfs-leaf-decorator-type=2")
+			}
 		}
 
-		cfg.requestedLinkers = strings.Join(linkerOpts, "_")
+		cfg.requestedNodeEncoder = strings.Join(ufsv1EncoderOpts, "_")
 	}
 
 	// ignore everything compat if a chunker is already given

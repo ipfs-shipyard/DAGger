@@ -7,10 +7,10 @@ import (
 )
 
 type config struct {
-	TargetValue uint32 `getopt:"--state-target State value denoting a chunk boundary (IPFS default: 0)"`
+	TargetValue uint32 `getopt:"--state-target    State value denoting a chunk boundary (IPFS default: 0)"`
 	MaskBits    int    `getopt:"--state-mask-bits Amount of bits of state to compare to target on every iteration. For random input average chunk size is about 2**m (IPFS default: 17)"`
-	MaxSize     int    `getopt:"--max-size Maximum data chunk size (IPFS default: 524288)"`
-	MinSize     int    `getopt:"--min-size Minimum data chunk size (IPFS default: 131072)"`
+	MaxSize     int    `getopt:"--max-size        Maximum data chunk size (IPFS default: 524288)"`
+	MinSize     int    `getopt:"--min-size        Minimum data chunk size (IPFS default: 131072)"`
 	xvName      string // getopt attached dynamically during init
 }
 

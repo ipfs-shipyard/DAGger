@@ -6,10 +6,9 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/ipfs-shipyard/DAGger/constants"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
-	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -21,9 +20,7 @@ func main() {
 
 	// Parse CLI and initialize everything
 	// On error it will log.Fatal() on its own
-	dgr, panicfWrapper := dagger.NewFromArgv(os.Args)
-
-	util.InternalPanicf = panicfWrapper
+	dgr := dagger.NewFromArgv(os.Args)
 
 	if 0 != (inStat.Mode() & os.ModeCharDevice) {
 		// do not try to optimize a TTY
@@ -48,25 +45,26 @@ func main() {
 		os.Stdin,
 		nil,
 	)
+	dgr.Destroy()
 	if profileStop != nil {
 		profileStop()
 	}
-
 	if processErr != nil {
 		log.Fatalf("Unexpected error processing STDIN: %s", processErr)
 	}
 
 	if constants.PerformSanityChecks {
-		if util.CheckGoroutineCount {
+		if util.CheckGoroutineShutdown {
 			// when we get here we should have shut down every goroutine there is
 			expectRunning := 1
 			if runtime.NumGoroutine() > expectRunning {
-				log.Printf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n",
+				stacks := make([]byte, 4*1024*1024)
+				stackLen := runtime.Stack(stacks, true)
+				log.Fatalf("\n\nUnexpected amount of goroutines: expected %d but %d goroutines still running\n\n%s\n",
 					expectRunning,
 					runtime.NumGoroutine(),
+					stacks[:stackLen],
 				)
-				p, _ := os.FindProcess(os.Getpid())
-				p.Signal(unix.SIGQUIT)
 			}
 		}
 

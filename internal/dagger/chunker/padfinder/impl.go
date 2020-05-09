@@ -1,8 +1,6 @@
 package padfinder
 
 import (
-	"regexp"
-
 	"github.com/ipfs-shipyard/DAGger/chunker"
 )
 
@@ -12,7 +10,6 @@ type config struct {
 
 type padfinderPreChunker struct {
 	maxChunkSize int
-	re2          *regexp.Regexp
 	config
 }
 
@@ -41,7 +38,7 @@ func (c *padfinderPreChunker) Split(
 
 		var m [2]int
 		{
-			minSparseSize := 88
+			minSparseSize := 42
 			firstImpossiblePos := postBufIdx - minSparseSize
 
 			m[0] = curIdx

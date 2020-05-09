@@ -2,73 +2,46 @@ package trickle
 
 import (
 	"fmt"
+	"math"
 
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/enc/dagpb"
-	dgrlinker "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
+	dgrcollector "github.com/ipfs-shipyard/DAGger/internal/dagger/collector"
+
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
 )
 
-type linker struct {
-	config
-	*dgrlinker.DaggerConfig
-	state
-}
+func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollector.Collector, initErrs []string) {
 
-func NewLinker(args []string, dgrCfg *dgrlinker.DaggerConfig) (_ dgrlinker.Linker, initErrs []string) {
-
-	l := &linker{
+	co := &collector{
 		DaggerConfig: dgrCfg,
 	}
 
 	optSet := getopt.New()
-	if err := options.RegisterSet("", &l.config, optSet); err != nil {
-		// A panic as this should not be possible
-		dgrCfg.InternalPanicf(
-			"option set registration failed: %s",
-			err,
-		)
+	if err := options.RegisterSet("", &co.config, optSet); err != nil {
+		initErrs = []string{fmt.Sprintf("option set registration failed: %s", err)}
+		return
 	}
 
 	// on nil-args the "error" is the help text to be incorporated into
 	// the larger help display
 	if args == nil {
-		return nil, util.SubHelp(
+		initErrs = util.SubHelp(
 			"Produces a \"side-balanced\" DAG optimized for streaming. Data blocks further\n"+
 				"away from the stream start are arranged in nodes at increasing depth away\n"+
 				"from the root. The rough \"placement group\" for a particular node LeafIndex\n"+
 				"away from the stream start can be derived numerically via:\n"+
 				"int( log( LeafIndex / MaxDirectLeaves ) / log( 1 + MaxSiblingSubgroups ) )\n"+
-				"See the example program in trickle/init.go for more info\n"+
-				"First argument must be a version specifier 'vN'. Currently only supports\n"+
-				"'v0', generating go-ipfs-standard, inefficient, 'Tsize'-full linknodes.",
+				"See the example program in trickle/init.go for more info.",
 			optSet,
 		)
+		return
 	}
-
-	// bail early if version unset
-	if len(args) < 2 || args[1] != "--v0" {
-		return nil, []string{"first linker option must be a version - currently only 'v0' is supported"}
-	}
-
-	if l.NextLinker != nil {
-		initErrs = append(
-			initErrs,
-			"v0 linker must appear last in chain",
-		)
-	}
-
-	args = append(
-		[]string{args[0]},
-		// drop the v0
-		args[2:]...,
-	)
 
 	// bail early if getopt fails
 	if err := optSet.Getopt(args, nil); err != nil {
-		return nil, []string{err.Error()}
+		initErrs = []string{err.Error()}
+		return
 	}
 
 	args = optSet.Args()
@@ -79,40 +52,33 @@ func NewLinker(args []string, dgrCfg *dgrlinker.DaggerConfig) (_ dgrlinker.Linke
 		))
 	}
 
-	if l.LegacyCIDv0Links &&
-		(l.HasherName != "sha2-256" ||
-			l.HasherBits != 256) {
+	if co.MaxDirectLeaves < 1 {
+		initErrs = append(initErrs, fmt.Sprintf(
+			"value of 'max-direct-leaves' %d is out of range [1:...]",
+			co.MaxDirectLeaves,
+		))
+	}
+
+	if co.MaxSiblingSubgroups < 1 {
+		initErrs = append(initErrs, fmt.Sprintf(
+			"value of 'max-sibling-subgroups' %d is out of range [1:...]",
+			co.MaxSiblingSubgroups,
+		))
+	}
+
+	if co.NextCollector != nil {
 		initErrs = append(
 			initErrs,
-			"legacy CIDv0 linking requires --hash=sha2-256 and --hash-bits=256",
+			"collector must appear last in chain",
 		)
 	}
 
-	if l.MaxDirectLeaves < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-direct-leaves' %d is out of range [1:...]",
-			l.MaxDirectLeaves,
-		))
-	}
+	// allocate space for ~8mil nodes (usually the result is 6 or7)
+	co.descentPrealloc = int(math.Ceil(
+		math.Log((1<<23)/float64(co.MaxDirectLeaves)) / math.Log(1+float64(co.MaxSiblingSubgroups)),
+	))
 
-	if l.MaxSiblingSubgroups < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-sibling-subgroups' %d is out of range [1:...]",
-			l.MaxSiblingSubgroups,
-		))
-	}
-
-	if l.LegacyDecoratedLeaves {
-		l.newLeaf = func(ls block.LeafSource) *block.Header {
-			return dagpb.UnixFSv1Leaf(ls, l.BlockMaker, dagpb.UnixFsTypeRaw)
-		}
-	} else {
-		l.newLeaf = func(ls block.LeafSource) *block.Header {
-			return block.RawDataLeaf(ls, l.BlockMaker)
-		}
-	}
-
-	return l, initErrs
+	return co, initErrs
 }
 
 // Complete CLI program demonstrating node placement

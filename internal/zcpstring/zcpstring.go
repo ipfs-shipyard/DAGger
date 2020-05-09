@@ -5,7 +5,7 @@ import (
 	"log"
 	"runtime"
 
-	"github.com/ipfs-shipyard/DAGger/constants"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 )
 
 var byteDict [256]byte
@@ -33,11 +33,11 @@ func NewFromSlice(s []byte) *ZcpString {
 }
 func NewWithSegmentCap(capOfSegmentContainer int) *ZcpString {
 	zcp := &ZcpString{
-		slices:    make([][]byte, 0, capOfSegmentContainer),
-		growGuard: constants.PerformSanityChecks,
+		slices: make([][]byte, 0, capOfSegmentContainer),
 	}
 	if constants.PerformSanityChecks {
 		zcp._attachOverallocationGuard()
+		zcp.growGuard = true
 	}
 	return zcp
 }

@@ -2,10 +2,10 @@ package padfinder
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
@@ -24,11 +24,8 @@ func NewChunker(
 
 	optSet := getopt.New()
 	if err := options.RegisterSet("", &c.config, optSet); err != nil {
-		// A panic as this should not be possible
-		dgrCfg.InternalPanicf(
-			"option set registration failed: %s",
-			err,
-		)
+		initErrs = []string{fmt.Sprintf("option set registration failed: %s", err)}
+		return
 	}
 
 	// on nil-args the "error" is the help text to be incorporated into
@@ -47,21 +44,21 @@ func NewChunker(
 		return
 	}
 
-	if c.Re2Longest == "" {
-		// FIXME - some day support more options but this one
-		initErrs = append(initErrs, "one of the available match options must be used")
-	} else {
-		var err error
-		if c.re2, err = regexp.Compile(c.Re2Longest); err != nil {
-			initErrs = append(initErrs, fmt.Sprintf(
-				"compilation of\n%s\n\tfailed: %s",
-				c.Re2Longest,
-				err,
-			))
-		} else {
-			c.re2.Longest()
-		}
-	}
+	// if c.Re2Longest == "" {
+	// 	// FIXME - some day support more options but this one
+	// 	initErrs = append(initErrs, "one of the available match options must be used")
+	// } else {
+	// 	var err error
+	// 	if c.re2, err = regexp.Compile(c.Re2Longest); err != nil {
+	// 		initErrs = append(initErrs, fmt.Sprintf(
+	// 			"compilation of\n%s\n\tfailed: %s",
+	// 			c.Re2Longest,
+	// 			err,
+	// 		))
+	// 	} else {
+	// 		c.re2.Longest()
+	// 	}
+	// }
 
 	c.maxChunkSize = dgrCfg.GlobalMaxChunkSize
 

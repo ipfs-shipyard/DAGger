@@ -6,6 +6,7 @@ import (
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 )
 

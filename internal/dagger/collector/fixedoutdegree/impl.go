@@ -1,0 +1,85 @@
+package fixedoutdegree
+
+import (
+	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	dgrcollector "github.com/ipfs-shipyard/DAGger/internal/dagger/collector"
+	dgrencoder "github.com/ipfs-shipyard/DAGger/internal/dagger/encoder"
+)
+
+type config struct {
+	MaxOutdegree int `getopt:"--max-outdegree   Maximum outdegree (children) for a node (IPFS default: 174)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
+}
+type state struct {
+	stack [][]*dgrblock.Header
+}
+type collector struct {
+	config
+	*dgrcollector.DaggerConfig
+	state
+}
+
+func (co *collector) FlushState() *dgrblock.Header {
+	if len(co.stack[len(co.stack)-1]) == 0 {
+		return nil
+	}
+
+	// it is critical to reset the collector state when we are done - we reuse the object!
+	defer func() { co.stack = [][]*dgrblock.Header{{}} }()
+
+	co.compactLayers(true) // merge everything
+	return co.stack[len(co.stack)-1][0]
+}
+
+func (co *collector) AppendLeaf(ls dgrblock.LeafSource) (hdr *dgrblock.Header) {
+	hdr = co.NodeEncoder.NewLeaf(ls)
+	co.AppendBlock(hdr)
+	return
+}
+
+func (co *collector) AppendBlock(hdr *dgrblock.Header) {
+	co.stack[0] = append(co.stack[0], hdr)
+
+	// Compact every time we reach enough loose nodes on the leaf-layer
+	// Helps relieve memory pressure/consumption on very large DAGs
+	if len(co.stack[0]) >= co.MaxOutdegree {
+		co.compactLayers(false) // do not proceed beyond already-full nodes
+	}
+}
+
+func (co *collector) compactLayers(fullMergeRequested bool) {
+
+	for stackLayerIdx := range co.stack {
+		curStack := &co.stack[stackLayerIdx] // shortcut
+
+		if len(*curStack) == 1 && len(co.stack)-1 == stackLayerIdx ||
+			!fullMergeRequested && len(*curStack) < co.MaxOutdegree {
+			break
+		}
+
+		// we got work to do - instantiate next stack if needed
+		if len(co.stack)-1 == stackLayerIdx {
+			co.stack = append(co.stack, []*dgrblock.Header{})
+		}
+
+		var curIdx int
+		for len(*curStack)-curIdx >= co.MaxOutdegree ||
+			fullMergeRequested && curIdx < len(*curStack) {
+
+			cutoffIdx := curIdx + co.MaxOutdegree
+			if cutoffIdx > len(*curStack) {
+				cutoffIdx = len(*curStack)
+			}
+
+			co.stack[stackLayerIdx+1] = append(co.stack[stackLayerIdx+1], co.NodeEncoder.NewLink(
+				dgrencoder.NodeOrigin{
+					OriginatorIndex: co.IndexInChain,
+					LocalSubLayer:   stackLayerIdx,
+				},
+				(*curStack)[curIdx:cutoffIdx],
+			))
+
+			curIdx = cutoffIdx
+		}
+		co.stack[stackLayerIdx] = co.stack[stackLayerIdx][curIdx:]
+	}
+}

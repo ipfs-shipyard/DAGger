@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"runtime"
 	"sync/atomic"
 	"time"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
-	"github.com/ipfs-shipyard/DAGger/constants"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
+	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	dgrencoder "github.com/ipfs-shipyard/DAGger/internal/dagger/encoder"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	"github.com/ipfs-shipyard/DAGger/internal/zcpstring"
 	"github.com/ipfs/go-qringbuf"
-	"golang.org/x/sys/unix"
 )
 
 // SANCHECK: not sure if any of these make sense, nor have I measured the cost
@@ -24,81 +23,94 @@ const (
 	chunkQueueSizeSubchunk = 32
 )
 
-func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver chan<- *block.Header) error {
+const (
+	ErrorString = IngestionEventType(iota)
+	NewChunkJsonl
+	NewRootJsonl
+)
+
+type IngestionEvent struct {
+	Type IngestionEventType
+	Body string
+}
+type IngestionEventType int
+
+// SANCHECK - we probably want some sort of timeout or somesuch here...
+func (dgr *Dagger) maybeSendEvent(t IngestionEventType, s string) {
+	if dgr.externalEventBus != nil {
+		dgr.externalEventBus <- IngestionEvent{Type: t, Body: s}
+	}
+}
+
+var preProcessTasks, postProcessTasks func(dgr *Dagger)
+
+func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<- IngestionEvent) (err error) {
+
+	var t0 time.Time
+
+	defer func() {
+		// we need to finish all emissions to complete before we measure/return
+		dgr.asyncWG.Wait()
+		if postProcessTasks != nil {
+			postProcessTasks(dgr)
+		}
+		dgr.qrb = nil
+		if dgr.externalEventBus != nil {
+			close(dgr.externalEventBus)
+		}
+		dgr.statSummary.SysStats.ElapsedNsecs = time.Since(t0).Nanoseconds()
+	}()
+
+	dgr.externalEventBus = optionalEventChan
+	defer func() {
+		if err != nil {
+
+			var buffered int
+			if dgr.qrb != nil {
+				dgr.qrb.Lock()
+				buffered = dgr.qrb.Buffered()
+				dgr.qrb.Unlock()
+			}
+
+			err = fmt.Errorf(
+				"failure at byte offset %s of sub-stream #%d with %s bytes buffered/unprocessed: %s",
+				util.Commify64(dgr.curStreamOffset),
+				dgr.statSummary.Streams,
+				util.Commify(buffered),
+				err,
+			)
+
+			dgr.maybeSendEvent(ErrorString, err.Error())
+		}
+	}()
+
+	if preProcessTasks != nil {
+		preProcessTasks(dgr)
+	}
+	t0 = time.Now()
 
 	var initErr error
 	dgr.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
 		// MinRegion must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
-		// SANCHECK: this may not necessarily be true...
 		MinRegion:   2 * dgr.cfg.GlobalMaxChunkSize,
 		MinRead:     dgr.cfg.RingBufferMinRead,
 		MaxCopy:     2 * dgr.cfg.GlobalMaxChunkSize, // SANCHECK having it equal to the MinRegion may be daft...
 		BufferSize:  dgr.cfg.RingBufferSize,
 		SectorSize:  dgr.cfg.RingBufferSectSize,
 		Stats:       &dgr.statSummary.SysStats.Stats,
-		TrackTiming: ((dgr.cfg.StatsEnabled & statsRingbuf) == statsRingbuf),
+		TrackTiming: ((dgr.cfg.StatsActive & statsRingbuf) == statsRingbuf),
 	})
 	if initErr != nil {
 		return initErr
 	}
 
-	if (dgr.cfg.StatsEnabled & statsBlocks) == statsBlocks {
+	if (dgr.cfg.StatsActive & statsBlocks) == statsBlocks {
 		dgr.seenBlocks = make(seenBlocks, 1024) // SANCHECK: somewhat arbitrary, but eh...
 		dgr.seenRoots = make(seenRoots, 32)
 	}
 
 	// use 64bits everywhere
 	var substreamSize int64
-
-	var t0 time.Time
-	var r0, r1 unix.Rusage
-
-	defer func() {
-		sys := &dgr.statSummary.SysStats
-
-		// we need to finish all emissions to complete before we measure/return
-		dgr.asyncWG.Wait()
-
-		sys.ElapsedNsecs = time.Since(t0).Nanoseconds()
-		unix.Getrusage(unix.RUSAGE_SELF, &r1) // ignore errors
-
-		if dgr.asyncHasherBus != nil {
-			wantCount := runtime.NumGoroutine() - dgr.cfg.AsyncHashers
-
-			// signal the hashers to shut down
-			close(dgr.asyncHasherBus)
-
-			if constants.PerformSanityChecks {
-				// we will be checking for leaked goroutines - wait a bit for hashers to shut down
-				for {
-					time.Sleep(2 * time.Millisecond)
-					if runtime.NumGoroutine() <= wantCount {
-						break
-					}
-				}
-			}
-		}
-
-		sys.CpuUserNsecs = unix.TimevalToNsec(r1.Utime) - unix.TimevalToNsec(r0.Utime)
-		sys.CpuSysNsecs = unix.TimevalToNsec(r1.Stime) - unix.TimevalToNsec(r0.Stime)
-		sys.MinFlt = r1.Minflt - r0.Minflt
-		sys.MajFlt = r1.Majflt - r0.Majflt
-		sys.BioRead = r1.Inblock - r0.Inblock
-		sys.BioWrite = r1.Oublock - r0.Oublock
-		sys.Sigs = r1.Nsignals - r0.Nsignals
-		sys.CtxSwYield = r1.Nvcsw - r0.Nvcsw
-		sys.CtxSwForced = r1.Nivcsw - r0.Nivcsw
-
-		sys.MaxRssBytes = r1.Maxrss
-		if runtime.GOOS != "darwin" {
-			// anywhere but mac maxrss is actually KiB, because fuck standards
-			// https://lists.apple.com/archives/darwin-kernel/2009/Mar/msg00005.html
-			sys.MaxRssBytes *= 1024
-		}
-	}()
-
-	unix.Getrusage(unix.RUSAGE_SELF, &r0) // ignore errors
-	t0 = time.Now()
 
 	// outer stream loop: read() syscalls happen only here and in the qrb.collector()
 	for {
@@ -127,6 +139,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 
 			dgr.statSummary.Streams++
 			dgr.curStreamOffset = 0
+			dgr.latestLeafInlined = false
 		}
 
 		if dgr.cfg.MultipartStream && substreamSize == 0 {
@@ -150,17 +163,18 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 			}
 		}
 
-		if dgr.cfg.generateRoots || dgr.seenRoots != nil || optionalRootsReceiver != nil {
+		if dgr.generateRoots || dgr.seenRoots != nil || dgr.externalEventBus != nil {
 
-			// pull the root out of the last member of the linker chain
-			rootBlock := dgr.chainedLinkers[len(dgr.chainedLinkers)-1].DeriveRoot()
-
-			// send a struct, nil or not
-			if optionalRootsReceiver != nil {
-				optionalRootsReceiver <- rootBlock
+			// cascading flush across the chain
+			var rootBlock *dgrblock.Header
+			for _, c := range dgr.chainedCollectors {
+				rootBlock = c.FlushState()
 			}
 
+			var rootPayloadSize, rootDagSize uint64
 			if rootBlock != nil {
+				rootPayloadSize = rootBlock.SizeCumulativePayload()
+				rootDagSize = rootBlock.SizeCumulativeDag()
 
 				if dgr.seenRoots != nil {
 					dgr.mu.Lock()
@@ -181,18 +195,19 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 
 					dgr.mu.Unlock()
 				}
+			}
 
-				if dgr.cfg.emitters[emRootsJsonl] != nil {
-					if _, err := fmt.Fprintf(
-						dgr.cfg.emitters[emRootsJsonl],
-						"{\"event\":   \"root\", \"payload\":%12d, \"stream\":%7d, %-67s, \"wiresize\":%12d }\n",
-						rootBlock.SizeCumulativePayload(),
-						dgr.statSummary.Streams,
-						fmt.Sprintf(`"cid":"%s"`, rootBlock.CidBase32()),
-						rootBlock.SizeCumulativeDag(),
-					); err != nil {
-						log.Fatalf("Emitting '%s' failed: %s", emRootsJsonl, err)
-					}
+			jsonl := fmt.Sprintf(
+				"{\"event\":   \"root\", \"payload\":%12d, \"stream\":%7d, %-67s, \"wiresize\":%12d }\n",
+				rootPayloadSize,
+				dgr.statSummary.Streams,
+				fmt.Sprintf(`"cid":"%s"`, rootBlock.CidBase32()),
+				rootDagSize,
+			)
+			dgr.maybeSendEvent(NewRootJsonl, jsonl)
+			if rootBlock != nil && dgr.cfg.emitters[emRootsJsonl] != nil {
+				if _, err := io.WriteString(dgr.cfg.emitters[emRootsJsonl], jsonl); err != nil {
+					return fmt.Errorf("emitting '%s' failed: %s", emRootsJsonl, err)
 				}
 			}
 		}
@@ -203,7 +218,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalRootsReceiver ch
 		}
 	}
 
-	return nil
+	return
 }
 
 // This is essentially a union:
@@ -234,10 +249,10 @@ func (dgr *Dagger) processStream(streamLimit int64) error {
 	var availableFromReader, processedFromReader int
 	var streamOffset int64
 
+	chunkingErr := make(chan error)
+
 	// this callback is passed through the recursive chain instead of a bare channel
 	// providing reasonable diag context
-	chunkingErr := make(chan error, 1)
-
 	errHandler := func(chunkerIdx int, wrOffset int64, wrSize, wrPos int, errStr string) {
 		chunkingErr <- fmt.Errorf(`
 
@@ -309,7 +324,7 @@ chunking error: %s%s`,
 				if !chanOpen {
 					break receiveChunks
 				}
-				processedFromReader += dgr.reassembleRecursiveResults(res)
+				processedFromReader += dgr.gatherRecursiveResults(res)
 			}
 		}
 
@@ -317,8 +332,7 @@ chunking error: %s%s`,
 	}
 }
 
-func (dgr *Dagger) reassembleRecursiveResults(result *recursiveSplitResult) int {
-
+func (dgr *Dagger) gatherRecursiveResults(result *recursiveSplitResult) int {
 	if result.subSplits != nil {
 		var substreamSize int
 		for {
@@ -326,15 +340,12 @@ func (dgr *Dagger) reassembleRecursiveResults(result *recursiveSplitResult) int 
 			if !channelOpen {
 				return substreamSize
 			}
-			substreamSize += dgr.reassembleRecursiveResults(subRes)
+			substreamSize += dgr.gatherRecursiveResults(subRes)
 		}
 	}
 
 	result.chunkBufRegion.Reserve()
-
-	// FIXME - need to validate there are indeed no errors to check ( something with car writing...? )
 	dgr.appendLeaf(result)
-
 	return result.chunk.Size
 }
 
@@ -355,10 +366,11 @@ func (dgr *Dagger) recursivelySplitBuffer(
 	chunkProcessor = func(c chunker.Chunk) error {
 		if c.Size <= 0 ||
 			c.Size > workRegion.Size()-processedBytes {
+			err := fmt.Errorf("returned chunk size %s out of bounds", util.Commify(c.Size))
 			errHandler(chunkerIdx, workRegionStreamOffset, workRegion.Size(), processedBytes,
-				fmt.Sprintf("returned chunk size %s out of bounds", util.Commify(c.Size)),
+				err.Error(),
 			)
-			return nil
+			return err
 		}
 
 		if len(dgr.chainedChunkers) > chunkerIdx+1 &&
@@ -427,28 +439,29 @@ func (dgr *Dagger) recursivelySplitBuffer(
 			recursiveResultsReturn,
 			errHandler,
 		)
-	} else {
-		if processedBytes <= 0 || processedBytes > workRegion.Size() {
-			errHandler(
-				chunkerIdx,
-				workRegionStreamOffset,
-				workRegion.Size(),
-				processedBytes,
-				fmt.Sprintf(
-					"returned %s bytes as chunks for a buffer of %s bytes",
-					util.Commify(processedBytes),
-					util.Commify(workRegion.Size()),
-				),
-			)
-		}
-
-		close(recursiveResultsReturn)
+		return
 	}
+
+	if processedBytes <= 0 || processedBytes > workRegion.Size() {
+		errHandler(
+			chunkerIdx,
+			workRegionStreamOffset,
+			workRegion.Size(),
+			processedBytes,
+			fmt.Sprintf(
+				"returned %s bytes as chunks for a buffer of %s bytes",
+				util.Commify(processedBytes),
+				util.Commify(workRegion.Size()),
+			),
+		)
+	}
+
+	close(recursiveResultsReturn)
 }
 
 func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 
-	var ls block.LeafSource
+	var ls dgrblock.LeafSource
 	var dr *qringbuf.Region
 	var leafLevel int
 	if res != nil {
@@ -463,10 +476,9 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 		}
 	}
 
-	hdr := dgr.chainedLinkers[0].NewLeafBlock(ls)
-	dgr.chainedLinkers[0].AppendBlock(hdr)
+	hdr := dgr.chainedCollectors[0].AppendLeaf(ls)
 
-	if dgr.cfg.emitChunks {
+	if dgr.emitChunks {
 		miniHash := " "
 		if sk := seenKey(hdr); sk != nil {
 			miniHash = fmt.Sprintf(`, "minihash":"%x"`, *sk)
@@ -476,63 +488,85 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 		if leafLevel > 0 {
 			size *= -1
 		}
-		if _, err := fmt.Fprintf(
-			dgr.cfg.emitters[emChunksJsonl],
+
+		jsonl := fmt.Sprintf(
 			"{\"event\":  \"chunk\",  \"offset\":%12d, \"length\":%7d, %-67s%s }\n",
 			dgr.curStreamOffset,
 			size,
 			fmt.Sprintf(`"cid":"%s"`, hdr.CidBase32()),
 			miniHash,
-		); err != nil {
+		)
+		dgr.maybeSendEvent(NewChunkJsonl, jsonl)
+
+		if _, err := io.WriteString(dgr.cfg.emitters[emChunksJsonl], jsonl); err != nil {
+			dgr.maybeSendEvent(ErrorString, err.Error())
 			log.Fatalf("Emitting '%s' failed: %s", emChunksJsonl, err)
 		}
 	}
 
+	// FIXME - I can't actually turn this on and keep convergence...
+	// if hdr.IsInlined() {
+	// 	if dgr.latestLeafInlined {
+	// 		log.Fatalf(
+	// 			"Two consecutive inlined leaves in stream - this indicates a logic error in chunkers: enable chunk listing to see offending sequence. Exact arguments were: %s",
+	// 			dgr.statSummary.SysStats.ArgvInitial,
+	// 		)
+	// 	}
+	// 	dgr.latestLeafInlined = true
+	// } else {
+	// 	dgr.latestLeafInlined = false
+	// }
+
 	dgr.curStreamOffset += int64(ls.Size)
 
-	// The leaf block processing is entirely decoupled from the linker chain
-	// Linkers call that same processor on intermediate link blocks they produce
+	// The leaf block processing is entirely decoupled from the collector chain
+	// Collectors call that same processor on intermediate link nodes they produce
 	dgr.asyncWG.Add(1)
-	go dgr.registerNewBlock(hdr, generatedBy{0, leafLevel}, nil, dr)
+	go dgr.registerNewBlock(
+		dgrencoder.NodeOrigin{
+			OriginatorIndex: -1,
+			LocalSubLayer:   leafLevel,
+		},
+		hdr,
+		dr,
+	)
 }
 
-// This function is called as "fire and forget" goroutines
-// It may only panic, no error handling
+// This function is called as multiple "fire and forget" goroutines
+// It may only try to send an error event, and it should(?) probably log.Fatal on its own
 func (dgr *Dagger) registerNewBlock(
-	hdr *block.Header,
-	gen generatedBy,
-	links []*block.Header,
+	origin dgrencoder.NodeOrigin,
+	hdr *dgrblock.Header,
 	dataRegion *qringbuf.Region,
 ) {
 	defer dgr.asyncWG.Done()
 
 	if constants.PerformSanityChecks {
 		if hdr == nil {
-			util.InternalPanicf("processor called with a nil block header reference")
+			log.Panic("block registration of a nil block header reference")
 		} else if hdr.SizeBlock() != 0 && hdr.SizeCumulativeDag() == 0 {
-			util.InternalPanicf("block header with dag-size of 0 encountered")
+			log.Panic("block header with dag-size of 0 encountered")
 		}
 	}
 
 	atomic.AddInt64(&dgr.statSummary.Dag.Size, int64(hdr.SizeBlock()))
 	atomic.AddInt64(&dgr.statSummary.Dag.Nodes, 1)
 
-	if dgr.seenBlocks != nil {
+	if hdr.SizeBlock() > 0 && dgr.seenBlocks != nil {
 		if k := seenKey(hdr); k != nil {
 			dgr.mu.Lock()
 
 			if s, exists := dgr.seenBlocks[*k]; exists {
-				s.seenAt[gen]++
+				s.seenAt[origin]++
 			} else {
 				var inblockDataSize int
 				if hdr.SizeLinkSection() == 0 {
 					inblockDataSize = int(hdr.SizeCumulativePayload())
 				}
 				s := uniqueBlockStats{
-					// currently not using this for any stats, but one day...
-					sizeData:  inblockDataSize,
+					sizeData:  inblockDataSize, // currently not using this for any stats, but one day...
 					sizeBlock: hdr.SizeBlock(),
-					seenAt:    seenTimesAt{gen: 1},
+					seenAt:    seenTimesAt{origin: 1},
 				}
 
 				if dgr.uniqueBlockCallback != nil {

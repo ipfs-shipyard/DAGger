@@ -3,11 +3,12 @@ package dagger
 import (
 	"sync"
 
-	"github.com/ipfs-shipyard/DAGger/chunker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/block"
-	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
-	dgrlinker "github.com/ipfs-shipyard/DAGger/internal/dagger/linker"
 	"github.com/ipfs/go-qringbuf"
+
+	"github.com/ipfs-shipyard/DAGger/chunker"
+	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
+	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
+	dgrcollector "github.com/ipfs-shipyard/DAGger/internal/dagger/collector"
 )
 
 type dgrChunkerUnit struct {
@@ -16,15 +17,21 @@ type dgrChunkerUnit struct {
 }
 
 type Dagger struct {
+	// speederization shortcut flags for internal logic
+	generateRoots bool
+	emitChunks    bool
+
+	latestLeafInlined   bool
 	curStreamOffset     int64
 	cfg                 config
 	statSummary         statSummary
 	chainedChunkers     []dgrChunkerUnit
-	chainedLinkers      []dgrlinker.Linker
+	chainedCollectors   []dgrcollector.Collector
+	externalEventBus    chan<- IngestionEvent
 	qrb                 *qringbuf.QuantizedRingBuffer
-	uniqueBlockCallback func(hdr *block.Header) *blockPostProcessResult
+	uniqueBlockCallback func(hdr *dgrblock.Header) *blockPostProcessResult
 	asyncWG             sync.WaitGroup
-	asyncHasherBus      block.AsyncHashBus
+	asyncHashingBus     dgrblock.AsyncHashingBus
 	mu                  sync.Mutex
 	seenBlocks          seenBlocks
 	seenRoots           seenRoots
