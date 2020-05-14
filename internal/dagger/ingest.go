@@ -92,9 +92,9 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 	var initErr error
 	dgr.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
 		// MinRegion must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
-		MinRegion:   2 * dgr.cfg.GlobalMaxChunkSize,
+		MinRegion:   2 * constants.MaxLeafPayloadSize,
 		MinRead:     dgr.cfg.RingBufferMinRead,
-		MaxCopy:     2 * dgr.cfg.GlobalMaxChunkSize, // SANCHECK having it equal to the MinRegion may be daft...
+		MaxCopy:     2 * constants.MaxLeafPayloadSize, // SANCHECK having it equal to the MinRegion may be daft...
 		BufferSize:  dgr.cfg.RingBufferSize,
 		SectorSize:  dgr.cfg.RingBufferSectSize,
 		Stats:       &dgr.statSummary.SysStats.Stats,
@@ -524,8 +524,8 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 	dgr.asyncWG.Add(1)
 	go dgr.registerNewBlock(
 		dgrencoder.NodeOrigin{
-			OriginatorIndex: -1,
-			LocalSubLayer:   leafLevel,
+			OriginatingLayer: -1,
+			LocalSubLayer:    leafLevel,
 		},
 		hdr,
 		dr,
@@ -546,6 +546,10 @@ func (dgr *Dagger) registerNewBlock(
 			log.Panic("block registration of a nil block header reference")
 		} else if hdr.SizeBlock() != 0 && hdr.SizeCumulativeDag() == 0 {
 			log.Panic("block header with dag-size of 0 encountered")
+		}
+
+		if origin.OriginatingLayer == 0 {
+			log.Panicf("Unexpected origin spec: %#v", origin)
 		}
 	}
 

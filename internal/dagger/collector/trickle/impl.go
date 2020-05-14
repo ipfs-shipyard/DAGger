@@ -43,7 +43,7 @@ func (co *collector) FlushState() *dgrblock.Header {
 		co.leafCount == 1 &&
 		co.state.tail.directLeaves[0].SizeCumulativePayload() == 0 {
 		// convergence requires a pb-unixfs-file leaf/link regardless of how the encoder is setup, go figure...
-		return co.NodeEncoder.IpfsCompatibleNulLink(dgrencoder.NodeOrigin{OriginatorIndex: co.IndexInChain})
+		return co.NodeEncoder.IpfsCompatibleNulLink(dgrencoder.NodeOrigin{OriginatingLayer: co.ChainPosition})
 	}
 
 	co.sealToLevel(0)
@@ -136,8 +136,8 @@ func (co *collector) sealToLevel(toDepth int) {
 	for co.tail.depth >= toDepth {
 		co.tail.parent.directLeaves = append(co.tail.parent.directLeaves, co.NodeEncoder.NewLink(
 			dgrencoder.NodeOrigin{
-				OriginatorIndex: co.IndexInChain,
-				LocalSubLayer:   -co.tail.depth, // negative local-layer signals "reverse-builder"
+				OriginatingLayer: co.ChainPosition,
+				LocalSubLayer:    -co.tail.depth, // negative local-layer signals "reverse-builder"
 			},
 			co.tail.directLeaves,
 		))

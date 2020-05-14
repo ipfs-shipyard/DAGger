@@ -12,7 +12,7 @@ type Collector interface {
 }
 
 type DaggerConfig struct {
-	IndexInChain  int
+	ChainPosition int // used for layer reconstruction in DAG stats
 	NodeEncoder   dgrencoder.NodeEncoder
 	NextCollector Collector
 }

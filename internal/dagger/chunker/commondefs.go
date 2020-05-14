@@ -7,9 +7,7 @@ type InstanceConstants struct {
 }
 
 type DaggerConfig struct {
-	IndexInChain       int
-	LastChainIndex     int
-	GlobalMaxChunkSize int
+	LastInChain bool
 }
 
 type Initializer func(

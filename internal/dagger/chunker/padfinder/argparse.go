@@ -6,6 +6,7 @@ import (
 	"github.com/ipfs-shipyard/DAGger/chunker"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
@@ -60,7 +61,7 @@ func NewChunker(
 	// 	}
 	// }
 
-	c.maxChunkSize = dgrCfg.GlobalMaxChunkSize
+	c.maxChunkSize = constants.MaxLeafPayloadSize
 
 	// this is a pre-chunker, any length goes
 	return &c, dgrchunker.InstanceConstants{MinChunkSize: 0}, initErrs

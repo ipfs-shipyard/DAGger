@@ -39,7 +39,7 @@ func (co *collector) AppendLeaf(ls dgrblock.LeafSource) (hdr *dgrblock.Header) {
 func (co *collector) AppendBlock(hdr *dgrblock.Header) {
 	co.stack[0] = append(co.stack[0], hdr)
 
-	// Compact every time we reach enough loose nodes on the leaf-layer
+	// Compact every time we reach enough nodes on the entry layer
 	// Helps relieve memory pressure/consumption on very large DAGs
 	if len(co.stack[0]) >= co.MaxOutdegree {
 		co.compactLayers(false) // do not proceed beyond already-full nodes
@@ -48,7 +48,7 @@ func (co *collector) AppendBlock(hdr *dgrblock.Header) {
 
 func (co *collector) compactLayers(fullMergeRequested bool) {
 
-	for stackLayerIdx := range co.stack {
+	for stackLayerIdx := 0; stackLayerIdx < len(co.stack); stackLayerIdx++ {
 		curStack := &co.stack[stackLayerIdx] // shortcut
 
 		if len(*curStack) == 1 && len(co.stack)-1 == stackLayerIdx ||
@@ -61,25 +61,30 @@ func (co *collector) compactLayers(fullMergeRequested bool) {
 			co.stack = append(co.stack, []*dgrblock.Header{})
 		}
 
-		var curIdx int
-		for len(*curStack)-curIdx >= co.MaxOutdegree ||
-			fullMergeRequested && curIdx < len(*curStack) {
+		var lastCutIdx int
+		for len(*curStack)-lastCutIdx >= co.MaxOutdegree ||
+			fullMergeRequested && lastCutIdx < len(*curStack) {
 
-			cutoffIdx := curIdx + co.MaxOutdegree
-			if cutoffIdx > len(*curStack) {
-				cutoffIdx = len(*curStack)
+			nextCutIdx := lastCutIdx + co.MaxOutdegree
+			if nextCutIdx > len(*curStack) {
+				nextCutIdx = len(*curStack)
 			}
 
 			co.stack[stackLayerIdx+1] = append(co.stack[stackLayerIdx+1], co.NodeEncoder.NewLink(
 				dgrencoder.NodeOrigin{
-					OriginatorIndex: co.IndexInChain,
-					LocalSubLayer:   stackLayerIdx,
+					OriginatingLayer: co.ChainPosition,
+					LocalSubLayer:    stackLayerIdx,
 				},
-				(*curStack)[curIdx:cutoffIdx],
+				(*curStack)[lastCutIdx:nextCutIdx],
 			))
 
-			curIdx = cutoffIdx
+			lastCutIdx = nextCutIdx
 		}
-		co.stack[stackLayerIdx] = co.stack[stackLayerIdx][curIdx:]
+
+		// shift everything to the last cut, without realloc
+		co.stack[stackLayerIdx] = (*curStack)[:copy(
+			*curStack,
+			(*curStack)[lastCutIdx:],
+		)]
 	}
 }

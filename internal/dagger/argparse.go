@@ -95,7 +95,6 @@ type config struct {
 
 	// 34 bytes is the largest identity CID that fits in 63 chars (dns limit) of b-prefixed base32 encoding
 	InlineMaxSize      int `getopt:"--inline-max-size          Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
-	GlobalMaxChunkSize int `getopt:"--max-chunk-size           Maximum data chunk size, same as maximum amount of payload in a leaf datablock. Default:"`
 	AsyncHashers       int `getopt:"--async-hashers            Number of concurrent short-lived goroutines performing hashing. Set to 0 (disable) for predictable benchmarking. Default:"`
 	RingBufferSize     int `getopt:"--ring-buffer-size         The size of the quantized ring buffer used for ingestion. Default:"`
 	RingBufferSectSize int `getopt:"--ring-buffer-sync-size    (EXPERT SETTING) The size of each buffer synchronization sector. Default:"` // option vaguely named 'sync' to not confuse users
@@ -147,13 +146,12 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 		// Some minimal non-controversial defaults, all overridable
 		// Try really hard to *NOT* have defaults that influence resulting CIDs
 		cfg: config{
-			GlobalMaxChunkSize: 1024 * 1024,
-			HashBits:           256,
-			AsyncHashers:       runtime.NumCPU() * 4, // SANCHECK yes, this is high: seems the simd version knows what to do...
+			HashBits:     256,
+			AsyncHashers: runtime.NumCPU() * 4, // SANCHECK yes, this is high: seems the simd version knows what to do...
 
 			StatsActive: statsBlocks,
 
-			// RingBufferSize: 2*int(constants.HardMaxBlockSize) + 256*1024, // bare-minimum with defaults
+			// RingBufferSize: 2*constants.HardMaxPayloadSize + 256*1024, // bare-minimum with defaults
 			RingBufferSize: 24 * 1024 * 1024, // SANCHECK low seems good somehow... fits in L3 maybe?
 
 			//SANCHECK: these numbers have not been validated
@@ -224,15 +222,6 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 	}
 
 	// has a default
-	if cfg.GlobalMaxChunkSize < 1 || cfg.GlobalMaxChunkSize > int(constants.HardMaxPayloadSize) {
-		argErrs = append(argErrs, fmt.Sprintf(
-			"--max-chunk-size '%s' out of bounds [1:%d]",
-			util.Commify(cfg.GlobalMaxChunkSize),
-			constants.HardMaxPayloadSize,
-		))
-	}
-
-	// has a default
 	if cfg.HashBits < 128 || (cfg.HashBits%8) != 0 {
 		argErrs = append(argErrs, "The value of --hash-bits must be a minimum of 128 and be divisible by 8")
 	}
@@ -243,30 +232,22 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 		argErrs = append(argErrs, "You must specify a valid value for --inline-max-size")
 	} else if cfg.InlineMaxSize < 0 ||
 		(cfg.InlineMaxSize > 0 && cfg.InlineMaxSize < 4) ||
-		cfg.InlineMaxSize > cfg.GlobalMaxChunkSize {
+		cfg.InlineMaxSize > constants.MaxLeafPayloadSize {
+		// https://github.com/multiformats/cid/issues/21
 		argErrs = append(argErrs, fmt.Sprintf(
 			"--inline-max-size '%s' out of bounds 0 or [4:%d]",
 			util.Commify(cfg.InlineMaxSize),
-			cfg.GlobalMaxChunkSize,
+			constants.MaxLeafPayloadSize,
 		))
 	}
 
-	var errorMessages []string
-
 	// Parses/creates the blockmaker/nodeencoder, to pass in turn to the collector chain
 	// Not stored in the dgr object itself, to cut down on logic leaks
-	var nodeEnc dgrencoder.NodeEncoder
-	nodeEnc, errorMessages = dgr.setupEncoding()
+	nodeEnc, errorMessages := dgr.setupEncoding()
 	argErrs = append(argErrs, errorMessages...)
-
-	errorMessages = dgr.setupCollectorChain(nodeEnc)
-	argErrs = append(argErrs, errorMessages...)
-
-	errorMessages = dgr.setupChunkerChain()
-	argErrs = append(argErrs, errorMessages...)
-
-	errorMessages = dgr.setupEmitters()
-	argErrs = append(argErrs, errorMessages...)
+	argErrs = append(argErrs, dgr.setupCollectorChain(nodeEnc)...)
+	argErrs = append(argErrs, dgr.setupChunkerChain()...)
+	argErrs = append(argErrs, dgr.setupEmitters()...)
 
 	if len(argErrs) != 0 {
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
@@ -565,10 +546,9 @@ func (dgr *Dagger) setupEncoding() (nodeEnc dgrencoder.NodeEncoder, argErrs []st
 		if nodeEnc, initErrors = init(
 			nodeEncArgs,
 			&dgrencoder.DaggerConfig{
-				GlobalMaxBlockSize: int(constants.HardMaxBlockSize),
-				BlockMaker:         blockMaker,
-				HasherName:         cfg.hashFunc,
-				HasherBits:         cfg.HashBits,
+				BlockMaker: blockMaker,
+				HasherName: cfg.hashFunc,
+				HasherBits: cfg.HashBits,
 				NewLinkBlockCallback: func(origin dgrencoder.NodeOrigin, newLinkHdr *dgrblock.Header, linkedBlocks []*dgrblock.Header) {
 					dgr.asyncWG.Add(1)
 					go dgr.registerNewBlock(
@@ -604,10 +584,6 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 	}
 
 	individualChunkers := strings.Split(dgr.cfg.requestedChunkers, "__")
-	commonCfg := dgrchunker.DaggerConfig{
-		LastChainIndex:     len(individualChunkers) - 1,
-		GlobalMaxChunkSize: dgr.cfg.GlobalMaxChunkSize,
-	}
 
 	for chunkerNum, chunkerCmd := range individualChunkers {
 		chunkerArgs := strings.Split(chunkerCmd, "_")
@@ -627,12 +603,11 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 			}
 		}
 
-		chunkerCfg := commonCfg // SHALLOW COPY!!!
-		chunkerCfg.IndexInChain = chunkerNum
-
 		if chunkerInstance, chunkerConstants, initErrors := init(
 			chunkerArgs,
-			&chunkerCfg,
+			&dgrchunker.DaggerConfig{
+				LastInChain: (chunkerNum == len(individualChunkers)-1),
+			},
 		); len(initErrors) > 0 {
 
 			dgr.cfg.erroredChunkers = append(dgr.cfg.erroredChunkers, chunkerArgs[0])
@@ -672,9 +647,9 @@ func (dgr *Dagger) setupCollectorChain(nodeEnc dgrencoder.NodeEncoder) (argErrs 
 
 	// we need to process the collectors in reverse, in order to populate NextCollector
 	dgr.chainedCollectors = make([]dgrcollector.Collector, len(individualCollectors))
-	for collectorNum := len(individualCollectors) - 1; collectorNum >= 0; collectorNum-- {
+	for collectorNum := len(individualCollectors); collectorNum > 0; collectorNum-- {
 
-		collectorCmd := individualCollectors[collectorNum]
+		collectorCmd := individualCollectors[collectorNum-1]
 
 		collectorArgs := strings.Split(collectorCmd, "_")
 		init, exists := availableCollectors[collectorArgs[0]]
@@ -694,9 +669,9 @@ func (dgr *Dagger) setupCollectorChain(nodeEnc dgrencoder.NodeEncoder) (argErrs 
 		}
 
 		collectorCfg := commonCfg // SHALLOW COPY!!!
-		collectorCfg.IndexInChain = collectorNum
-		if collectorNum != len(individualCollectors)-1 {
-			collectorCfg.NextCollector = dgr.chainedCollectors[collectorNum+1]
+		collectorCfg.ChainPosition = collectorNum
+		if collectorNum != len(individualCollectors) {
+			collectorCfg.NextCollector = dgr.chainedCollectors[collectorNum]
 		}
 
 		if collectorInstance, initErrors := init(
@@ -713,7 +688,7 @@ func (dgr *Dagger) setupCollectorChain(nodeEnc dgrencoder.NodeEncoder) (argErrs 
 				))
 			}
 		} else {
-			dgr.chainedCollectors[collectorNum] = collectorInstance
+			dgr.chainedCollectors[collectorNum-1] = collectorInstance
 		}
 	}
 

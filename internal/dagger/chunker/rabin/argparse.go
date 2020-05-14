@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
@@ -56,17 +57,17 @@ func NewChunker(
 		))
 	}
 
-	if c.MinSize < 1 || c.MinSize > dgrCfg.GlobalMaxChunkSize-1 {
+	if c.MinSize < 1 || c.MinSize > constants.MaxLeafPayloadSize-1 {
 		initErrs = append(initErrs, fmt.Sprintf(
 			"value for 'min-size' in the range [1:%d] must be specified",
-			dgrCfg.GlobalMaxChunkSize-1,
+			constants.MaxLeafPayloadSize-1,
 		),
 		)
 	}
-	if c.MaxSize < 1 || c.MaxSize > dgrCfg.GlobalMaxChunkSize {
+	if c.MaxSize < 1 || c.MaxSize > constants.MaxLeafPayloadSize {
 		initErrs = append(initErrs, fmt.Sprintf(
 			"value for 'max-size' in the range [1:%d] must be specified",
-			dgrCfg.GlobalMaxChunkSize,
+			constants.MaxLeafPayloadSize,
 		),
 		)
 	}

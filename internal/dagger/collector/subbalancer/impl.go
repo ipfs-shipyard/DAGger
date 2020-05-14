@@ -11,17 +11,17 @@ import (
 )
 
 type config struct {
-	MaxPayload          int `getopt:"--max-payload   Maximum payload size in each node. To skip payload-based balancing, set this to 0."`
-	MinSurroundSiblings int `getopt:"--min-surrounding-siblings The minimum amount of siblings before and after a node, for its CID to be matched "`
-}
-type state struct {
-	sumPayload int
-	stack      []*dgrblock.Header
+	MaxPayload    int `getopt:"--max-payload   FIXME Maximum payload size in each node. To skip payload-based balancing, set this to 0."`
+	CidMaskBits   int `getopt:"--cid-tail-mask-bits FIXME Amount of bits from the end of a cryptographic Cid to compare of state to compare to target on every iteration. For random input average chunk size is about 2**m"`
+	CidTailTarget int `getopt:"--cid-tail-target    FIXME State value denoting a chunk boundary"`
+	MinSubgroup   int `getopt:"--min-subgroup  FIXME The minimum amount of nodes clustered together before employing CID-based subgrouping"`
 }
 type collector struct {
+	cidMask int
 	config
+	sumPayload uint64
+	stack      []*dgrblock.Header
 	*dgrcollector.DaggerConfig
-	state
 }
 
 func (co *collector) FlushState() *dgrblock.Header {
@@ -29,19 +29,20 @@ func (co *collector) FlushState() *dgrblock.Header {
 		return nil
 	}
 
-	// it is critical to reset the collector state when we are done - we reuse the object!
-	defer func() { co.state = state{} }()
-
 	var tailHdr *dgrblock.Header
 	if len(co.stack) == 1 {
 		tailHdr = co.stack[0]
 	} else {
 		tailHdr = co.NodeEncoder.NewLink(
-			dgrencoder.NodeOrigin{OriginatorIndex: co.IndexInChain},
+			dgrencoder.NodeOrigin{OriginatingLayer: co.ChainPosition},
 			co.stack,
 		)
 	}
 	co.NextCollector.AppendBlock(tailHdr)
+
+	// we flush often, do not realloc
+	co.stack = co.stack[:0]
+	co.sumPayload = 0
 
 	return nil // we are never last: do not return the intermediate block
 }
@@ -53,10 +54,12 @@ func (co *collector) AppendLeaf(ls dgrblock.LeafSource) (hdr *dgrblock.Header) {
 }
 
 func (co *collector) AppendBlock(newHdr *dgrblock.Header) {
-	// the *last* thing we do is append the block we just got
+
+	// the *last* thing we do is append the block we just got, after determining
+	// if a flush is needed
 	defer func() {
 		co.stack = append(co.stack, newHdr)
-		co.sumPayload += int(newHdr.SizeCumulativePayload())
+		co.sumPayload += newHdr.SizeCumulativePayload()
 	}()
 
 	if len(co.stack) > 0 &&
@@ -65,46 +68,48 @@ func (co *collector) AppendBlock(newHdr *dgrblock.Header) {
 		return
 	}
 
-	if co.MaxPayload > 0 && newHdr.SizeCumulativePayload() > uint64(co.MaxPayload) {
-		log.Panicf(
-			"block %s representing %s bytes of payload appended at sub-balancing layer with activated max-payload limit of %s",
-			newHdr.String(),
-			util.Commify64(int64(newHdr.SizeCumulativePayload())),
-			util.Commify(co.MaxPayload),
-		)
+	if co.MaxPayload > 0 {
+		if newHdr.SizeCumulativePayload() > uint64(co.MaxPayload) {
+			log.Panicf(
+				"block %s representing %s bytes of payload appended at sub-balancing layer with activated max-payload limit of %s",
+				newHdr.String(),
+				util.Commify64(int64(newHdr.SizeCumulativePayload())),
+				util.Commify(co.MaxPayload),
+			)
+		}
+
+		if co.sumPayload+newHdr.SizeCumulativePayload() > uint64(co.MaxPayload) {
+			co.FlushState()
+			return
+		}
 	}
 
-	if co.sumPayload+int(newHdr.SizeCumulativePayload()) > co.MaxPayload {
-		// co.FlushState()
+	if len(co.stack) > co.MinSubgroup+1 {
 
-		co.NextCollector.AppendBlock(co.NodeEncoder.NewLink(
-			dgrencoder.NodeOrigin{OriginatorIndex: co.IndexInChain},
-			co.stack[0:len(co.stack)],
-		))
+		tgtIdx := len(co.stack) - 1
+		tgtBlock := co.stack[tgtIdx]
+		tgtCid := tgtBlock.Cid()
 
-		// fmt.Printf("%d\ttail of %s\n", 0, co.stack[tgtIdx].CidBase32())
-		co.sumPayload = 0
-		// int(co.stack[len(co.stack)].SizeCumulativePayload())
-		co.stack = co.stack[len(co.stack):]
-		return
-	}
+		if (int(binary.BigEndian.Uint16(tgtCid[len(tgtCid)-2:])) & co.cidMask) == co.CidTailTarget {
 
-	if len(co.stack) >= co.MinSurroundSiblings*2 {
-		tgtIdx := len(co.stack) - co.MinSurroundSiblings + 1
-		tgtCid := co.stack[tgtIdx].Cid()
-
-		tailVal := binary.BigEndian.Uint16(tgtCid[len(tgtCid)-2:])
-		if tailVal&((1<<5)-1) == 0 {
+			// fmt.Printf("\t\tMatch %s\n", tgtBlock.CidBase32())
 
 			linkHdr := co.NodeEncoder.NewLink(
-				dgrencoder.NodeOrigin{OriginatorIndex: co.IndexInChain},
+				dgrencoder.NodeOrigin{OriginatingLayer: co.ChainPosition},
 				co.stack[0:tgtIdx+1],
 			)
 			co.NextCollector.AppendBlock(linkHdr)
 
 			// fmt.Printf("%d\ttail of %s\n", 0, co.stack[tgtIdx].CidBase32())
-			co.sumPayload -= int(linkHdr.SizeCumulativePayload())
-			co.stack = co.stack[tgtIdx+1:]
+			co.sumPayload -= linkHdr.SizeCumulativePayload()
+
+			// shift everything to the last cut, without realloc
+			co.stack = co.stack[:copy(
+				co.stack,
+				co.stack[tgtIdx+1:],
+			)]
+			return
 		}
 	}
+
 }

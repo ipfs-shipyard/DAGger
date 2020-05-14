@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
@@ -47,11 +48,11 @@ func NewChunker(
 		}
 	}
 
-	if c.size > dgrCfg.GlobalMaxChunkSize {
+	if c.size > constants.MaxLeafPayloadSize {
 		initErrs = append(initErrs, fmt.Sprintf(
 			"provided chunk size '%s' exceeds specified maximum payload size '%s",
 			util.Commify(c.size),
-			util.Commify(dgrCfg.GlobalMaxChunkSize),
+			util.Commify(constants.MaxLeafPayloadSize),
 		))
 	}
 

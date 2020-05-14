@@ -61,8 +61,7 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 		)
 	}
 
-	co.MinSurroundSiblings = 3
-	co.MaxPayload = 65535
+	co.cidMask = (1 << co.CidMaskBits) - 1
 
 	return co, initErrs
 }

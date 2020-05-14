@@ -44,19 +44,24 @@ func (co *collector) AppendLeaf(ls dgrblock.LeafSource) (hdr *dgrblock.Header) {
 }
 
 func (co *collector) AppendBlock(hdr *dgrblock.Header) {
-	sz := co.NodeEncoder.LinkframeSize(hdr)
-	if sz > co.MaxLinksectionSize {
+
+	frameSize := co.NodeEncoder.LinkframeSize(hdr)
+
+	// FIXME A clash of max-linksection with max-inline-cid sizing
+	if frameSize > co.MaxLinksectionSize {
 		log.Panicf(
 			"linkframe for block %s is %s bytes long, exceeding the max-linksection-size of %s",
 			hdr.String(),
-			util.Commify(sz),
+			util.Commify(frameSize),
 			util.Commify(co.MaxLinksectionSize),
 		)
 	}
 
-	co.stack[0].linkframesSize += sz
+	co.stack[0].linkframesSize += frameSize
 	co.stack[0].nodes = append(co.stack[0].nodes, hdr)
 
+	// Compact every time we reach enough nodes on the entry layer
+	// Helps relieve memory pressure/consumption on very large DAGs
 	// if co.stack[0].linkframesSize >= co.MaxLinksectionSize {
 	// 	co.compactLayers(false) // do not proceed beyond already-full nodes
 	// }
@@ -64,7 +69,7 @@ func (co *collector) AppendBlock(hdr *dgrblock.Header) {
 
 func (co *collector) compactLayers(fullMergeRequested bool) {
 
-	for stackLayerIdx := range co.stack {
+	for stackLayerIdx := 0; stackLayerIdx < len(co.stack); stackLayerIdx++ {
 		curStack := &co.stack[stackLayerIdx] // shortcut
 
 		if len(curStack.nodes) == 1 && len(co.stack)-1 == stackLayerIdx ||
@@ -77,47 +82,40 @@ func (co *collector) compactLayers(fullMergeRequested bool) {
 			co.stack = append(co.stack, layer{})
 		}
 
-		var curIdx, lastIdx, curSize, runningSize int
-		for curIdx < len(co.stack) {
-			curSize = co.NodeEncoder.LinkframeSize(curStack.nodes[curIdx])
-			if runningSize+curSize >= co.MaxLinksectionSize {
+		var lastCutIdx int
+		for curStack.linkframesSize > co.MaxLinksectionSize ||
+			fullMergeRequested && lastCutIdx < len(curStack.nodes) {
 
-				// fmt.Println("comp")
-				linkHdr := co.NodeEncoder.NewLink(
-					dgrencoder.NodeOrigin{
-						OriginatorIndex: co.IndexInChain,
-						LocalSubLayer:   stackLayerIdx,
-					},
-					curStack.nodes[lastIdx:curIdx],
-				)
-
-				co.stack[stackLayerIdx+1].nodes = append(co.stack[stackLayerIdx+1].nodes, linkHdr)
-				co.stack[stackLayerIdx+1].linkframesSize += co.NodeEncoder.LinkframeSize(linkHdr)
-
-				runningSize = 0
-				lastIdx = curIdx
+			var runninglinksectionSize, overflowingNodeFramesize int
+			curIdx := lastCutIdx
+			for curIdx < len(curStack.nodes) {
+				overflowingNodeFramesize = co.NodeEncoder.LinkframeSize(curStack.nodes[curIdx])
+				if runninglinksectionSize+overflowingNodeFramesize > co.MaxLinksectionSize {
+					break
+				}
+				runninglinksectionSize += overflowingNodeFramesize
+				curIdx++
 			}
-
-			runningSize += curSize
-			curIdx++
-		}
-
-		if fullMergeRequested && lastIdx != len(co.stack) {
 
 			linkHdr := co.NodeEncoder.NewLink(
 				dgrencoder.NodeOrigin{
-					OriginatorIndex: co.IndexInChain,
-					LocalSubLayer:   stackLayerIdx,
+					OriginatingLayer: co.ChainPosition,
+					LocalSubLayer:    stackLayerIdx,
 				},
-				curStack.nodes[lastIdx:],
+				curStack.nodes[lastCutIdx:curIdx],
 			)
-
 			co.stack[stackLayerIdx+1].nodes = append(co.stack[stackLayerIdx+1].nodes, linkHdr)
 			co.stack[stackLayerIdx+1].linkframesSize += co.NodeEncoder.LinkframeSize(linkHdr)
 
-			lastIdx = len(co.stack)
+			curStack.linkframesSize -= runninglinksectionSize
+			runninglinksectionSize = overflowingNodeFramesize
+			lastCutIdx = curIdx
 		}
 
-		co.stack[stackLayerIdx].nodes = co.stack[stackLayerIdx].nodes[lastIdx:]
+		// shift everything to the last cut, without realloc
+		curStack.nodes = curStack.nodes[:copy(
+			curStack.nodes,
+			curStack.nodes[lastCutIdx:],
+		)]
 	}
 }

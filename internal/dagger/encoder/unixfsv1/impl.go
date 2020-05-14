@@ -29,8 +29,9 @@ func (e *encoder) NewLeaf(ls dgrblock.LeafSource) *dgrblock.Header {
 			0,
 			0,
 		)
+	}
 
-	} else if ls.Size == 0 {
+	if ls.Size == 0 {
 		// short-circuit for convergence with go-ipfs, regardless of UnixFS type id
 		return e.compatNulBlock()
 	}
@@ -74,12 +75,10 @@ func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Heade
 
 	for i := range blocks {
 
-		// fmt.Println(blocks[i].CidBase32())
-
 		cid := blocks[i].Cid()
 		if e.LegacyCIDv0Links &&
 			!blocks[i].IsCidInlined() &&
-			blocks[i].SizeCumulativePayload() != blocks[i].SizeCumulativeDag() { // size inequality is a hack to quickly distinguish raw leaf blocks from everything else
+			blocks[i].SizeCumulativePayload() != blocks[i].SizeCumulativeDag() { // this inequality is a hack to quickly distinguish raw leaf blocks from everything else
 
 			// the magic of CIDv0
 			cid = cid[2:]
@@ -118,6 +117,8 @@ func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Heade
 
 		totalPayload += blocks[i].SizeCumulativePayload()
 		subDagSize += blocks[i].SizeCumulativeDag()
+
+		// fmt.Println(blocks[i].CidBase32())
 	}
 
 	linkSectionSize := linkSection.Size()
@@ -148,10 +149,9 @@ func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Heade
 		linkSectionSize,
 	)
 
+	// fmt.Printf("\t%s\t%d\t%d\n", h.CidBase32(), h.SizeLinkSection(), h.SizeCumulativePayload())
+
 	e.NewLinkBlockCallback(origin, h, nil)
-
-	// fmt.Printf("\t%s\t%d\n", b.CidBase32(), b.SizeCumulativePayload())
-
 	return h
 }
 
@@ -161,15 +161,17 @@ func (e *encoder) IpfsCompatibleNulLink(origin dgrencoder.NodeOrigin) *dgrblock.
 	return h
 }
 
+// represents the protobuf
+// 1 {
+// 	1: 2
+// 	3: 0
+// }
+var nulPb = []byte("\x0a\x04\x08\x02\x18\x00")
+
 // SANCHECK: do not cache for now... may skew stats
 func (e *encoder) compatNulBlock() *dgrblock.Header {
-	// represents the protobuf
-	// 1 {
-	// 	1: 2
-	// 	3: 0
-	// }
 	return e.BlockMaker(
-		zcpstring.NewFromSlice([]byte("\x0a\x04\x08\x02\x18\x00")),
+		zcpstring.NewFromSlice(nulPb),
 		dgrblock.CodecPB,
 		0,
 		0,

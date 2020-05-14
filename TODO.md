@@ -8,3 +8,6 @@ Crap remaining
 - [ ] Validate mask vs value
 - [ ] Validate no defaults
 - [ ] Review code for [0:y:y]
+- [ ] Check all CLI ntakes (shoould be all int)
+- [ ] Error messages on sizing
+- [ ] Inline/maxlinksection check

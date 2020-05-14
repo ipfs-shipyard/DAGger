@@ -12,8 +12,8 @@ type NodeEncoder interface {
 }
 
 type NodeOrigin struct {
-	OriginatorIndex int
-	LocalSubLayer   int
+	OriginatingLayer int
+	LocalSubLayer    int
 }
 
 type Initializer func(
@@ -22,7 +22,6 @@ type Initializer func(
 ) (instance NodeEncoder, initErrorStrings []string)
 
 type DaggerConfig struct {
-	GlobalMaxBlockSize   int
 	HasherBits           int
 	HasherName           string
 	BlockMaker           dgrblock.Maker

@@ -248,11 +248,11 @@ func MakerFromConfig(
 			blockContent = &zcpstring.ZcpString{}
 		}
 
-		if constants.PerformSanityChecks && blockContent.Size() > int(constants.HardMaxBlockSize) {
+		if constants.PerformSanityChecks && blockContent.Size() > constants.MaxBlockWireSize {
 			log.Panicf(
 				"size of supplied block %s exceeds the hard maximum block size %s",
 				util.Commify(blockContent.Size()),
-				util.Commify64(int64(constants.HardMaxBlockSize)),
+				util.Commify(constants.MaxBlockWireSize),
 			)
 		}
 

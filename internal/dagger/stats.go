@@ -156,7 +156,7 @@ func (dgr *Dagger) OutputSummary() {
 
 		for i, g := range genInOrder {
 
-			if g.OriginatorIndex == -1 {
+			if g.OriginatingLayer == -1 {
 				if g.LocalSubLayer == 0 {
 					layers[g].LongLabel = "DataBlocks"
 					layers[g].label = "DB"
@@ -312,8 +312,8 @@ func (dgr *Dagger) OutputSummary() {
 func sortGenerators(g []dgrencoder.NodeOrigin) {
 	if len(g) > 1 {
 		sort.Slice(g, func(i, j int) bool {
-			if g[i].OriginatorIndex != g[j].OriginatorIndex {
-				return g[i].OriginatorIndex > g[j].OriginatorIndex
+			if g[i].OriginatingLayer != g[j].OriginatingLayer {
+				return g[i].OriginatingLayer > g[j].OriginatingLayer
 			}
 			return g[i].LocalSubLayer > g[j].LocalSubLayer
 		})
