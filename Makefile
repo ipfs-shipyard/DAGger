@@ -66,7 +66,7 @@ serve-latest-pprof-allocs:
 
 test: build-maint
 	# anything above 32 and we blow through > 256 open file handles
-	go test -timeout=0 -parallel=32 -count=1 -failfast ./...
+	go test -tags "$(DAGTAG_PADFINDER_TYPE)" -timeout=0 -parallel=32 -count=1 -failfast ./...
 
 build-maint:
 	mkdir -p tmp/maintbin

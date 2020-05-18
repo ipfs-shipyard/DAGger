@@ -104,5 +104,8 @@ func NewChunker(
 	c.initState = ((c.outTable[0] << 8) | 1) ^ (c.modTable[c.outTable[0]>>45])
 	c.minSansPreheat = c.MinSize - c.windowSize
 
-	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.MinSize}, initErrs
+	return &c, dgrchunker.InstanceConstants{
+		MinChunkSize: c.MinSize,
+		MaxChunkSize: c.MaxSize,
+	}, initErrs
 }

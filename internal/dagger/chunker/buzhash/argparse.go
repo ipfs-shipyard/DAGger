@@ -100,5 +100,8 @@ func NewChunker(
 
 	c.minSansPreheat = c.MinSize - 32
 
-	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.MinSize}, initErrs
+	return &c, dgrchunker.InstanceConstants{
+		MinChunkSize: c.MinSize,
+		MaxChunkSize: c.MaxSize,
+	}, initErrs
 }

@@ -56,5 +56,8 @@ func NewChunker(
 		))
 	}
 
-	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.size}, initErrs
+	return &c, dgrchunker.InstanceConstants{
+		MinChunkSize: c.size,
+		MaxChunkSize: c.size,
+	}, initErrs
 }
