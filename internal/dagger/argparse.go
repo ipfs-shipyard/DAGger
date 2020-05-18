@@ -10,71 +10,23 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	dgrblock "github.com/ipfs-shipyard/DAGger/internal/dagger/block"
-
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/buzhash"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/fixedsize"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/padfinder"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/pigz"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/chunker/rabin"
-
 	dgrcollector "github.com/ipfs-shipyard/DAGger/internal/dagger/collector"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/fixedlinksectionsize"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/fixedoutdegree"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/nul"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/subbalancer"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/collector/trickle"
-
 	dgrencoder "github.com/ipfs-shipyard/DAGger/internal/dagger/encoder"
-	"github.com/ipfs-shipyard/DAGger/internal/dagger/encoder/unixfsv1"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
 	getopt "github.com/pborman/getopt/v2"
 	"github.com/pborman/options"
 )
 
-var availableChunkers = map[string]dgrchunker.Initializer{
-	"padfinder":  padfinder.NewChunker,
-	"fixed-size": fixedsize.NewChunker,
-	"buzhash":    buzhash.NewChunker,
-	"rabin":      rabin.NewChunker,
-	"pigz":       pigz.NewChunker,
-}
-var availableCollectors = map[string]dgrcollector.Initializer{
-	"fixed-linksection-size": fixedlinksectionsize.NewCollector,
-	"fixed-outdegree":        fixedoutdegree.NewCollector,
-	"trickle":                trickle.NewCollector,
-	"sub-balancer":           subbalancer.NewCollector,
-	"none":                   nul.NewCollector,
-}
-var availableNodeEncoders = map[string]dgrencoder.Initializer{
-	"unixfsv1": unixfsv1.NewEncoder,
-}
-
-type emissionTargets map[string]io.WriteCloser
-
-const (
-	emNone                = "none"
-	emStatsText           = "stats-text"
-	emStatsJsonl          = "stats-jsonl"
-	emRootsJsonl          = "roots-jsonl"
-	emChunksJsonl         = "chunks-jsonl"
-	emCarV0Fifos          = "car-v0-fifos"
-	emCarV0RootlessStream = "car-v0-rootless-stream"
-)
-
-// where the CLI initial error messages go
-var argParseErrOut = os.Stderr
-
 type config struct {
 	optSet *getopt.Set
 
 	// where to output
-	emitters map[string]io.WriteCloser
+	emitters emissionTargets
 
 	//
 	// Bulk of CLI options definition starts here, the rest further down in initArgvParser()
@@ -83,7 +35,7 @@ type config struct {
 	Help             bool `getopt:"-h --help             Display basic help"`
 	HelpAll          bool `getopt:"--help-all            Display full help including options for every currently supported chunker/collector/encoder"`
 	MultipartStream  bool `getopt:"--multipart           Expect multiple SInt64BE-size-prefixed streams on stdIN"`
-	ProcessNulInputs bool `getopt:"--process-nul-inputs  Instead of skipping zero-length streams, emit a proper zero-length CID based on current settings"`
+	ProcessNulInputs bool `getopt:"--process-nul-inputs  Instead of skipping zero-length streams, emit an IPFS-compatible zero-length CID based on current settings"`
 
 	emittersStdErr []string // Emitter spec: option/helptext in initArgvParser()
 	emittersStdOut []string // Emitter spec: option/helptext in initArgvParser()
@@ -107,7 +59,7 @@ type config struct {
 
 	requestedChunkers    string // Chunker chain: option/helptext in initArgvParser()
 	requestedCollectors  string // Collector chain: option/helptext in initArgvParser()
-	requestedNodeEncoder string // The global (for now) node => block encoder: option/helptext in initArgvParser
+	requestedNodeEncoder string // The global (for now) node=>block encoder: option/helptext in initArgvParser
 
 	IpfsCompatCmd string `getopt:"--ipfs-add-compatible-command A complete go-ipfs/js-ipfs add command serving as a basis config (any conflicting option will take precedence)"`
 }
@@ -117,28 +69,20 @@ const (
 	statsRingbuf
 )
 
-func (dgr *Dagger) Destroy() {
-	dgr.mu.Lock()
-	if dgr.asyncHashingBus != nil {
-		wantCount := runtime.NumGoroutine() - dgr.cfg.AsyncHashers
-		close(dgr.asyncHashingBus)
-		dgr.asyncHashingBus = nil
+type emissionTargets map[string]io.WriteCloser
 
-		if constants.PerformSanityChecks {
-			dgr.mu.Unlock()
-			// we will be checking for leaked goroutines - wait a bit for hashers to shut down
-			for {
-				time.Sleep(2 * time.Millisecond)
-				if runtime.NumGoroutine() <= wantCount {
-					break
-				}
-			}
-			dgr.mu.Lock()
-		}
-	}
-	dgr.qrb = nil
-	dgr.mu.Unlock()
-}
+const (
+	emNone                = "none"
+	emStatsText           = "stats-text"
+	emStatsJsonl          = "stats-jsonl"
+	emRootsJsonl          = "roots-jsonl"
+	emChunksJsonl         = "chunks-jsonl"
+	emCarV0Fifos          = "car-v0-fifos"
+	emCarV0RootlessStream = "car-v0-rootless-stream"
+)
+
+// where the CLI initial error messages go
+var argParseErrOut = os.Stderr
 
 func NewFromArgv(argv []string) (dgr *Dagger) {
 
@@ -163,13 +107,13 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 
 			// not defaults but rather the list of known/configured emitters
 			emitters: emissionTargets{
-				emNone:        nil,
-				emStatsText:   nil,
-				emStatsJsonl:  nil,
-				emRootsJsonl:  nil,
-				emChunksJsonl: nil,
-				// emCarV0Fifos:          nil,
-				// emCarV0RootlessStream: nil,
+				emNone:                nil,
+				emStatsText:           nil,
+				emStatsJsonl:          nil,
+				emRootsJsonl:          nil,
+				emChunksJsonl:         nil,
+				emCarV0Fifos:          nil,
+				emCarV0RootlessStream: nil,
 			},
 		},
 	}
@@ -245,9 +189,14 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 	// Not stored in the dgr object itself, to cut down on logic leaks
 	nodeEnc, errorMessages := dgr.setupEncoding()
 	argErrs = append(argErrs, errorMessages...)
-	argErrs = append(argErrs, dgr.setupCollectorChain(nodeEnc)...)
 	argErrs = append(argErrs, dgr.setupChunkerChain()...)
+	argErrs = append(argErrs, dgr.setupCollectorChain(nodeEnc)...)
 	argErrs = append(argErrs, dgr.setupEmitters()...)
+
+	// Opts check out - set up the car emitter
+	if len(argErrs) == 0 {
+		argErrs = append(argErrs, dgr.setupCarWriting()...)
+	}
 
 	if len(argErrs) != 0 {
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
@@ -262,7 +211,7 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 		os.Exit(1)
 	}
 
-	// Opts check out - take a snapshot of what we ended up with
+	// Opts *still* check out - take a snapshot of what we ended up with
 	cfg.optSet.VisitAll(func(o getopt.Option) {
 		switch o.LongName() {
 		case "help", "help-all", "ipfs-add-compatible-command":
@@ -418,31 +367,6 @@ func (cfg *config) initArgvParser() {
 
 func (dgr *Dagger) setupEmitters() (argErrs []string) {
 
-	// FIXME - car
-	// } else {
-	// 	// setup stream-out callback if needed
-	// 	for _, carType := range []string{
-	// 		emCarV0Fifos,
-	// 		emCarV0RootlessStream,
-	// 	} {
-	// 		if cfg.emitters[carType] != nil {
-
-	// 			if (dgr.cfg.StatsActive & statsBlocks) != statsBlocks {
-	// 				argErrs = append(argErrs, fmt.Sprintf(
-	// 					"disabling blockstat collection conflicts with selected emitter '%s'",
-	// 					carType,
-	// 				))
-	// 				break
-	// 			}
-
-	// 			dgr.uniqueBlockCallback = func(hdr *dgrblock.Header) *blockPostProcessResult {
-	// 				log.Panic("car writing not yet implemented") // FIXME
-	// 				return &blockPostProcessResult{}
-	// 			}
-	// 		}
-	// 	}
-	// }
-
 	activeStderr := make(map[string]bool, len(dgr.cfg.emittersStdErr))
 	for _, s := range dgr.cfg.emittersStdErr {
 		activeStderr[s] = true
@@ -493,6 +417,37 @@ func (dgr *Dagger) setupEmitters() (argErrs []string) {
 	// set couple shortcuts based on emitter config
 	dgr.emitChunks = (dgr.cfg.emitters[emChunksJsonl] != nil)
 	dgr.generateRoots = (dgr.cfg.emitters[emRootsJsonl] != nil || dgr.cfg.emitters[emStatsJsonl] != nil)
+
+	return
+}
+
+func (dgr *Dagger) setupCarWriting() (argErrs []string) {
+
+	if dgr.cfg.emitters[emCarV0Fifos] == nil && dgr.cfg.emitters[emCarV0RootlessStream] == nil {
+		return
+	}
+
+	// for _, carType := range []string{
+	// 	emCarV0Fifos,
+	// 	emCarV0RootlessStream,
+	// } {
+	// 	if dgr.cfg.emitters[carType] != nil {
+
+	// 		if (dgr.cfg.StatsActive & statsBlocks) != statsBlocks {
+	// 			argErrs = append(argErrs, fmt.Sprintf(
+	// 				"disabling blockstat collection conflicts with selected emitter '%s'",
+	// 				carType,
+	// 			))
+	// 			return
+	// 		}
+
+	// 		if carType == emCarV0Fifos {
+	// 			// dgr.uniqueBlockCallback = func(hdr *dgrblock.Header, _ *blockPostProcessResult) {
+
+	// 			// }
+	// 		}
+	// 	}
+	// }
 
 	return
 }
@@ -551,7 +506,7 @@ func (dgr *Dagger) setupEncoding() (nodeEnc dgrencoder.NodeEncoder, argErrs []st
 				HasherBits: cfg.HashBits,
 				NewLinkBlockCallback: func(origin dgrencoder.NodeOrigin, newLinkHdr *dgrblock.Header, linkedBlocks []*dgrblock.Header) {
 					dgr.asyncWG.Add(1)
-					go dgr.registerNewBlock(
+					go dgr.postProcessBlock(
 						origin,
 						newLinkHdr,
 						nil, // a link-node has no data, for now at least
@@ -603,13 +558,30 @@ func (dgr *Dagger) setupChunkerChain() (argErrs []string) {
 			}
 		}
 
-		if chunkerInstance, chunkerConstants, initErrors := init(
+		chunkerInstance, chunkerConstants, initErrors := init(
 			chunkerArgs,
 			&dgrchunker.DaggerConfig{
-				LastInChain: (chunkerNum == len(individualChunkers)-1),
+				IsLastInChain: (chunkerNum == len(individualChunkers)-1),
 			},
-		); len(initErrors) > 0 {
+		)
 
+		if len(initErrors) == 0 {
+			if chunkerConstants.MaxChunkSize < 1 || chunkerConstants.MaxChunkSize > constants.MaxLeafPayloadSize {
+				initErrors = append(initErrors, fmt.Sprintf(
+					"returned MaxChunkSize constant '%d' out of range [1:%d]",
+					chunkerConstants.MaxChunkSize,
+					constants.MaxLeafPayloadSize,
+				))
+			} else if chunkerConstants.MinChunkSize < 0 || chunkerConstants.MinChunkSize > chunkerConstants.MaxChunkSize {
+				initErrors = append(initErrors, fmt.Sprintf(
+					"returned MinChunkSize constant '%d' out of range [0:%d]",
+					chunkerConstants.MinChunkSize,
+					chunkerConstants.MaxChunkSize,
+				))
+			}
+		}
+
+		if len(initErrors) > 0 {
 			dgr.cfg.erroredChunkers = append(dgr.cfg.erroredChunkers, chunkerArgs[0])
 			for _, e := range initErrors {
 				argErrs = append(argErrs, fmt.Sprintf(
@@ -641,6 +613,12 @@ func (dgr *Dagger) setupCollectorChain(nodeEnc dgrencoder.NodeEncoder) (argErrs 
 
 	commonCfg := dgrcollector.DaggerConfig{
 		NodeEncoder: nodeEnc,
+	}
+
+	for _, c := range dgr.chainedChunkers {
+		if c.constants.MaxChunkSize > commonCfg.ChunkerChainMaxResult {
+			commonCfg.ChunkerChainMaxResult = c.constants.MaxChunkSize
+		}
 	}
 
 	individualCollectors := strings.Split(dgr.cfg.requestedCollectors, "__")

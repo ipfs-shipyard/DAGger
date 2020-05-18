@@ -20,45 +20,51 @@ type encoder struct {
 	*dgrencoder.DaggerConfig
 }
 
-func (e *encoder) NewLeaf(ls dgrblock.LeafSource) *dgrblock.Header {
+func (e *encoder) NewLeaf(ds dgrblock.DataSource) *dgrblock.Header {
+
 	if e.UnixFsType == -1 {
 		return e.BlockMaker(
-			ls.Content,
+			ds.Content,
 			dgrblock.CodecRaw,
-			uint64(ls.Size),
-			0,
+			uint64(ds.Size),
 			0,
 		)
 	}
 
-	if ls.Size == 0 {
+	if ds.Size == 0 {
 		// short-circuit for convergence with go-ipfs, regardless of UnixFS type id
 		return e.compatNulBlock()
 	}
 
-	dataLen := util.VarintSlice(uint64(ls.Size))
+	dataLen := util.VarintSlice(uint64(ds.Size))
 
 	blockData := zcpstring.NewWithSegmentCap(9)
 	blockData.AddByte(pbHdrF1LD)
-	blockData.AddSlice(util.VarintSlice(uint64(3 + 2*len(dataLen) + ls.Size + 1)))
+	blockData.AddSlice(util.VarintSlice(uint64(3 + 2*len(dataLen) + ds.Size + 1)))
 	blockData.AddByte(pbHdrF1VI)
 	blockData.AddByte(byte(e.UnixFsType))
 	blockData.AddByte(pbHdrF2LD)
 	blockData.AddSlice(dataLen)
-	blockData.AddZcp(ls.Content)
+	blockData.AddZcp(ds.Content)
 	blockData.AddByte(pbHdrF3VI)
 	blockData.AddSlice(dataLen)
 
 	return e.BlockMaker(
 		blockData,
 		dgrblock.CodecPB,
-		uint64(ls.Size),
-		0,
+		uint64(ds.Size),
 		0,
 	)
 }
 
 func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Header) *dgrblock.Header {
+
+	// special-case compat bullshit
+	if blocks == nil {
+		h := e.compatNulBlock()
+		e.NewLinkBlockCallback(origin, h, nil)
+		return h
+	}
 
 	var totalPayload, subDagSize uint64
 	var linkBlock, linkSection, seekOffsets *zcpstring.ZcpString
@@ -117,11 +123,8 @@ func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Heade
 
 		totalPayload += blocks[i].SizeCumulativePayload()
 		subDagSize += blocks[i].SizeCumulativeDag()
-
-		// fmt.Println(blocks[i].CidBase32())
 	}
 
-	linkSectionSize := linkSection.Size()
 	payloadSizeVI := util.VarintSlice(totalPayload)
 
 	if e.CompatPb {
@@ -146,17 +149,14 @@ func (e *encoder) NewLink(origin dgrencoder.NodeOrigin, blocks []*dgrblock.Heade
 		dgrblock.CodecPB,
 		totalPayload,
 		subDagSize,
-		linkSectionSize,
 	)
 
-	// fmt.Printf("\t%s\t%d\t%d\n", h.CidBase32(), h.SizeLinkSection(), h.SizeCumulativePayload())
+	// if origin.OriginatingLayer > 1 {
+	// 	for _, b := range blocks {
+	// 		fmt.Printf("%s\t%d\t%d\t <= %s\n", h.CidBase32(), h.SizeLinkSection(), h.SizeCumulativePayload(), b.CidBase32())
+	// 	}
+	// }
 
-	e.NewLinkBlockCallback(origin, h, nil)
-	return h
-}
-
-func (e *encoder) IpfsCompatibleNulLink(origin dgrencoder.NodeOrigin) *dgrblock.Header {
-	h := e.compatNulBlock()
 	e.NewLinkBlockCallback(origin, h, nil)
 	return h
 }
@@ -175,20 +175,7 @@ func (e *encoder) compatNulBlock() *dgrblock.Header {
 		dgrblock.CodecPB,
 		0,
 		0,
-		0,
 	)
-}
-
-func (e *encoder) LinkframeSize(hdr *dgrblock.Header) int {
-
-	size := len(hdr.Cid())
-	size += 1 + util.VarintWireSize(uint64(size))
-
-	if !e.NonstandardLeanLinks {
-		size += 3 + util.VarintWireSize(hdr.SizeCumulativeDag())
-	}
-
-	return 1 + util.VarintWireSize(uint64(size)) + size
 }
 
 const (

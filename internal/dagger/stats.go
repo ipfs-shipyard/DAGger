@@ -98,7 +98,6 @@ type sameSizeBlockStats struct {
 	CountRootBlocksAtSize   int64 `json:"roots,omitempty"`
 }
 type uniqueBlockStats struct {
-	sizeData  int // recorded but not aggregated for output at present
 	sizeBlock int
 	seenAt    seenTimesAt
 	*blockPostProcessResult
@@ -113,7 +112,7 @@ func (dgr *Dagger) OutputSummary() {
 	}
 
 	smr := &dgr.statSummary
-	var totalUCount, totalUWeight, leafUWeight, leafUCount, sparseUWeight, sparseUCount int64
+	var totalUCount, totalUWeight, leafUWeight, leafUCount int64
 
 	if dgr.seenBlocks != nil && len(dgr.seenBlocks) > 0 {
 		layers := make(map[dgrencoder.NodeOrigin]*layerStats, 10) // if more than 10 layers - something odd is going on
@@ -148,33 +147,40 @@ func (dgr *Dagger) OutputSummary() {
 			}
 		}
 
+		var nonLinkLayers int
 		genInOrder := make([]dgrencoder.NodeOrigin, 0, len(layers))
 		for g := range layers {
 			genInOrder = append(genInOrder, g)
+			if g.OriginatingLayer == -1 {
+				nonLinkLayers++
+			}
 		}
 		sortGenerators(genInOrder)
 
 		for i, g := range genInOrder {
-
 			if g.OriginatingLayer == -1 {
-				if g.LocalSubLayer == 0 {
-					layers[g].LongLabel = "DataBlocks"
-					layers[g].label = "DB"
+				if g.LocalSubLayer == 0 || g.LocalSubLayer == 1 {
 					for s, c := range layers[g].countTracker {
 						leafUWeight += c.CountUniqueBlocksAtSize * int64(s)
 						leafUCount += c.CountUniqueBlocksAtSize
 					}
+				}
+				if g.LocalSubLayer == 0 {
+					layers[g].LongLabel = "DataBlocks"
+					layers[g].label = "DB"
+				} else if g.LocalSubLayer == 1 {
+					layers[g].LongLabel = "PaddingBlocks"
+					layers[g].label = "PB"
+				} else if g.LocalSubLayer == 2 {
+					layers[g].LongLabel = "PaddingSuperblocks"
+					layers[g].label = "PS"
 				} else {
-					layers[g].LongLabel = "SparseBlocks"
-					layers[g].label = "SB"
-					for s, c := range layers[g].countTracker {
-						sparseUWeight += c.CountUniqueBlocksAtSize * int64(s)
-						sparseUCount += c.CountUniqueBlocksAtSize
-					}
+					log.Fatalf("Unexpected leaf-local-layer '%d'", g.LocalSubLayer)
 				}
 			} else {
-				layers[g].LongLabel = fmt.Sprintf("LinkingLayer%d", i+1)
-				layers[g].label = fmt.Sprintf("L%d", i+1)
+				id := len(genInOrder) - i - nonLinkLayers
+				layers[g].LongLabel = fmt.Sprintf("LinkingLayer%d", id)
+				layers[g].label = fmt.Sprintf("L%d", id)
 			}
 
 			for _, c := range layers[g].countTracker {
@@ -192,7 +198,7 @@ func (dgr *Dagger) OutputSummary() {
 		// emit the JSON last, so that piping to e.g. `jq` works nicer
 		defer func() {
 
-			// because the golang encoder is garbage
+			// because the golang json encoder is rather garbage
 			if smr.Layers == nil {
 				smr.Layers = []layerStats{}
 			}
@@ -279,7 +285,7 @@ func (dgr *Dagger) OutputSummary() {
 		descParts = append(descParts, fmt.Sprintf(
 			"Linked as streams by:%17s bytes over %s unique DAG-PB nodes\n"+
 				"Taking a grand-total:%17s bytes, ",
-			util.Commify64(totalUWeight-leafUWeight-sparseUWeight), util.Commify64(totalUCount-leafUCount-sparseUCount),
+			util.Commify64(totalUWeight-leafUWeight), util.Commify64(totalUCount-leafUCount),
 			util.Commify64(totalUWeight),
 		))
 	} else {

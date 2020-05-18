@@ -23,12 +23,15 @@ func main() {
 	dgr := dagger.NewFromArgv(os.Args)
 
 	if 0 != (inStat.Mode() & os.ModeCharDevice) {
-		// do not try to optimize a TTY
 		fmt.Fprint(
 			os.Stderr,
 			"------\nYou seem to be feeding data straight from a terminal, an odd choice...\nNevertheless will proceed to read until EOF ( Ctrl+D )\n------\n",
 		)
-	} else {
+	} else if !inStat.Mode().IsRegular() || inStat.Size() > 16*1024*1024 { // SANCHECK - arbitrary
+		// Try optimizations if:
+		// - not a reguar file (and not a TTY - exempted above)
+		// - regular file larger than a certain size (SANCHECK: somewhat arbitrary)
+		// An optimization returns os.ErrInvalid when it can't be applied to the file type
 		for _, opt := range util.ReadOptimizations {
 			if err := opt.Action(os.Stdin, inStat); err != nil && err != os.ErrInvalid {
 				log.Printf("Failed to apply read optimization hint '%s' to stdIN: %s\n", opt.Name, err)

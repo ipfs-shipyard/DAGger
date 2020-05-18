@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash"
 	"log"
+	"math"
 	"sync/atomic"
 
 	blake2b "github.com/minio/blake2b-simd"
@@ -61,10 +62,10 @@ type Header struct {
 	// Everything in this struct needs to be "cacheable"
 	// That is no data that changes without a panic can be present
 	// ( e.g. stuff like "how many times was block seen in dag" is out )
-	dummyHashed      bool
-	isCidInlined     bool
-	sizeBlock        int
-	sizeLinkSection  int
+	dummyHashed  bool
+	isCidInlined bool
+	sizeBlock    int
+	// sizeCidRefs      int
 	totalSizePayload uint64
 	totalSizeDag     uint64
 	cid              []byte
@@ -83,9 +84,8 @@ func (h *Header) Content() (c *zcpstring.ZcpString) {
 	return
 }
 func (h *Header) EvictContent() {
-	if constants.PerformSanityChecks &&
-		atomic.AddInt32(h.contentGone, 1) != 1 {
-		log.Panic("block content already evicted")
+	if constants.PerformSanityChecks {
+		atomic.AddInt32(h.contentGone, 1)
 	}
 	h.content = nil
 }
@@ -105,8 +105,9 @@ func (h *Header) Cid() []byte {
 
 	return h.cid
 }
-func (h *Header) SizeBlock() int                { return h.sizeBlock }
-func (h *Header) SizeLinkSection() int          { return h.sizeLinkSection }
+func (h *Header) SizeBlock() int { return h.sizeBlock }
+
+// func (h *Header) SizeLinkSection() int          { return h.sizeLinkSection }
 func (h *Header) IsCidInlined() bool            { return h.isCidInlined }
 func (h *Header) DummyHashed() bool             { return h.dummyHashed }
 func (h *Header) SizeCumulativeDag() uint64     { return h.totalSizeDag }
@@ -117,11 +118,10 @@ type Maker func(
 	codecID uint,
 	sizePayload uint64,
 	sizeSubDag uint64,
-	sizeLinkSection int,
 ) *Header
 
-type LeafSource struct {
-	chunker.Chunk // critically *NOT* a reference, so that an empty LeafSource{} is usable on its own
+type DataSource struct {
+	chunker.Chunk // critically *NOT* a reference, so that an empty DataSource{} is usable on its own
 	Content       *zcpstring.ZcpString
 }
 
@@ -159,7 +159,6 @@ func MakerFromConfig(
 	inlineMaxSize int,
 	maxAsyncHashers int,
 ) (maker Maker, asyncHashQueue chan hashTask, errString string) {
-	var nativeHashSize int
 
 	hashopts, found := AvailableHashers[hashAlg]
 	if !found {
@@ -171,8 +170,9 @@ func MakerFromConfig(
 		return
 	}
 
+	var nativeHashSize int
 	if hashopts.hasherMaker == nil {
-		nativeHashSize = 1<<31 - 1
+		nativeHashSize = math.MaxInt32
 	} else {
 		nativeHashSize = hashopts.hasherMaker().Size()
 	}
@@ -209,11 +209,11 @@ func MakerFromConfig(
 	cidPreMadeChan := make(chan struct{})
 	close(cidPreMadeChan)
 
-	var standaloneHasher hash.Hash
+	var hasherSingleton hash.Hash
 	if hashopts.hasherMaker != nil {
 
 		if maxAsyncHashers == 0 {
-			standaloneHasher = hashopts.hasherMaker()
+			hasherSingleton = hashopts.hasherMaker()
 
 		} else {
 			asyncHashQueue = make(chan hashTask, 8*maxAsyncHashers) // SANCHECK queue up to 8 times the available workers
@@ -241,7 +241,7 @@ func MakerFromConfig(
 		codecID uint,
 		sizeSubPayload uint64,
 		sizeSubDag uint64,
-		sizeLinkSection int,
+		// sizeLinkSection int,
 	) *Header {
 
 		if blockContent == nil {
@@ -291,7 +291,7 @@ func MakerFromConfig(
 			sizeBlock:        blockContent.Size(),
 			totalSizeDag:     sizeSubDag + uint64(blockContent.Size()),
 			totalSizePayload: sizeSubPayload, // at present there is no payload in link-nodes
-			sizeLinkSection:  sizeLinkSection,
+			// sizeLinkSection:  sizeLinkSection,
 		}
 
 		if inlineMaxSize > 0 &&
@@ -329,9 +329,9 @@ func MakerFromConfig(
 			finLen := codecs[codecID].hashedCidLength
 
 			if asyncHashQueue == nil {
-				standaloneHasher.Reset()
-				blockContent.WriteTo(standaloneHasher)
-				hdr.cid = (standaloneHasher.Sum(hdr.cid))[0:finLen:finLen]
+				hasherSingleton.Reset()
+				blockContent.WriteTo(hasherSingleton)
+				hdr.cid = (hasherSingleton.Sum(hdr.cid))[0:finLen:finLen]
 			} else {
 				hdr.cidReady = make(chan struct{})
 				asyncHashQueue <- hashTask{

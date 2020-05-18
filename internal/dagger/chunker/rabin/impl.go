@@ -76,7 +76,7 @@ func (c *rabinChunker) Split(
 			curIdx++
 		}
 
-		// awlays a find at this point, we bailed on short buffers earlier
+		// always a find at this point, we bailed on short buffers earlier
 		err = cb(chunker.Chunk{Size: curIdx - lastIdx})
 		if err != nil {
 			return

@@ -5,10 +5,8 @@ import (
 )
 
 type NodeEncoder interface {
-	NewLeaf(leafSource dgrblock.LeafSource) (leafBlock *dgrblock.Header)
+	NewLeaf(leafSource dgrblock.DataSource) (leafBlock *dgrblock.Header)
 	NewLink(origin NodeOrigin, blocksToLink []*dgrblock.Header) (linkBlock *dgrblock.Header)
-	IpfsCompatibleNulLink(origin NodeOrigin) (leafBlock *dgrblock.Header)
-	LinkframeSize(ofBlock *dgrblock.Header) (bytesNeededToReferenceBlock int)
 }
 
 type NodeOrigin struct {
@@ -25,5 +23,5 @@ type DaggerConfig struct {
 	HasherBits           int
 	HasherName           string
 	BlockMaker           dgrblock.Maker
-	NewLinkBlockCallback func(origin NodeOrigin, linkBlock *dgrblock.Header, linkedNodes []*dgrblock.Header)
+	NewLinkBlockCallback func(origin NodeOrigin, block *dgrblock.Header, linkedNodes []*dgrblock.Header)
 }

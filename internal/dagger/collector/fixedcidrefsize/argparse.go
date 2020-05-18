@@ -1,4 +1,4 @@
-package fixedlinksectionsize
+package fixedcidrefsize
 
 import (
 	"fmt"
@@ -14,7 +14,7 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 
 	co := &collector{
 		DaggerConfig: dgrCfg,
-		state:        state{stack: []layer{{}}},
+		state:        state{stack: []*layer{{}}},
 	}
 
 	optSet := getopt.New()

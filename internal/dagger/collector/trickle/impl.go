@@ -9,7 +9,7 @@ import (
 )
 
 type config struct {
-	UnixfsNulLeaf       bool `getopt:"--unixfs-nul-leaf-compat Flag to force convergence with go-ipfs *specifically* when encoding a 0-length stream (override encoder leaf-type)"`
+	UnixfsNulLeafCompat bool `getopt:"--unixfs-nul-leaf-compat Flag to force convergence with go-ipfs *specifically* when encoding a 0-length stream (override encoder leaf-type)"`
 	MaxDirectLeaves     int  `getopt:"--max-direct-leaves      Maximum leaves per node (IPFS default: 174)"`          // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
 	MaxSiblingSubgroups int  `getopt:"--max-sibling-subgroups  Maximum same-depth-groups per node (IPFS default: 4)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/trickle/trickledag.go#L34
 	descentPrealloc     int
@@ -39,19 +39,19 @@ func (co *collector) FlushState() *dgrblock.Header {
 	defer func() { co.state = state{} }()
 
 	// special case to match go-ipfs on zero-length streams
-	if co.UnixfsNulLeaf &&
+	if co.UnixfsNulLeafCompat &&
 		co.leafCount == 1 &&
 		co.state.tail.directLeaves[0].SizeCumulativePayload() == 0 {
-		// convergence requires a pb-unixfs-file leaf/link regardless of how the encoder is setup, go figure...
-		return co.NodeEncoder.IpfsCompatibleNulLink(dgrencoder.NodeOrigin{OriginatingLayer: co.ChainPosition})
+		// convergence requires a pb-unixfs-file link/leaf regardless of how the encoder is setup, go figure...
+		return co.NodeEncoder.NewLink(dgrencoder.NodeOrigin{OriginatingLayer: -1}, nil)
 	}
 
 	co.sealToLevel(0)
 	return co.tail.directLeaves[0]
 }
 
-func (co *collector) AppendLeaf(ls dgrblock.LeafSource) (hdr *dgrblock.Header) {
-	hdr = co.NodeEncoder.NewLeaf(ls)
+func (co *collector) AppendData(ds dgrblock.DataSource) (hdr *dgrblock.Header) {
+	hdr = co.NodeEncoder.NewLeaf(ds)
 	co.AppendBlock(hdr)
 	return
 }

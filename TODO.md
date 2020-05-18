@@ -11,3 +11,4 @@ Crap remaining
 - [ ] Check all CLI ntakes (shoould be all int)
 - [ ] Error messages on sizing
 - [ ] Inline/maxlinksection check
+- [ ] Inline / fixedcidref

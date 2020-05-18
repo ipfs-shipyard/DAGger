@@ -33,13 +33,13 @@ func (c *pigzChunker) Split(
 		nextRoundMax = lastIdx + c.MaxSize
 
 		// we will be running out of data, but still *could* run a round
-		if nextRoundMax >= postBufIdx {
+		if nextRoundMax > postBufIdx {
 			// abort early if we are allowed to
 			if !useEntireBuffer {
 				return
 			}
 			// otherwise signify where we stop hard
-			nextRoundMax = postBufIdx - 1
+			nextRoundMax = postBufIdx
 		}
 
 		// in case we will *NOT* be able to run another round at all
@@ -53,19 +53,13 @@ func (c *pigzChunker) Split(
 		// preheat
 		curIdx += c.minSansPreheat
 		for i := 0; i < c.MaskBits; i++ {
-			state = ((state << 1) ^ int32(buf[curIdx+1])) & c.mask
+			state = (state << 1) ^ int32(buf[curIdx])
 			curIdx++
 		}
 
 		// cycle
-		for curIdx < nextRoundMax && state != c.TargetValue {
-			state = ((state << 1) ^ int32(buf[curIdx+1])) & c.mask
-			curIdx++
-		}
-
-		// FIXME - last-equalization
-		if curIdx == postBufIdx-1 &&
-			curIdx+1-lastIdx <= c.MaxSize {
+		for curIdx < nextRoundMax && ((state & c.mask) != c.TargetValue) {
+			state = (state << 1) ^ int32(buf[curIdx])
 			curIdx++
 		}
 

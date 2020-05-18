@@ -145,7 +145,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 		if dgr.cfg.MultipartStream && substreamSize == 0 {
 			// If we got here: cfg.ProcessNulInputs is true
 			// Special case for a one-time zero-CID emission
-			dgr.appendLeaf(nil)
+			dgr.streamAppend(nil)
 		} else if err := dgr.processStream(substreamSize); err != nil {
 			if err == io.ErrUnexpectedEOF {
 				return fmt.Errorf(
@@ -159,7 +159,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 			} else if dgr.curStreamOffset == 0 && dgr.cfg.ProcessNulInputs {
 				// we did try to process a stream and ended up with an EOF + 0
 				// emit a zero-CID like above
-				dgr.appendLeaf(nil)
+				dgr.streamAppend(nil)
 			}
 		}
 
@@ -278,7 +278,7 @@ chunking error: %s%s`,
 			util.Commify64(wrOffset),
 			util.Commify64(wrOffset+int64(wrPos)),
 			chunkerIdx,
-			dgr.chainedChunkers[chunkerIdx],
+			dgr.chainedChunkers[chunkerIdx].instance,
 			errStr,
 			"\n\n",
 		)
@@ -345,7 +345,7 @@ func (dgr *Dagger) gatherRecursiveResults(result *recursiveSplitResult) int {
 	}
 
 	result.chunkBufRegion.Reserve()
-	dgr.appendLeaf(result)
+	dgr.streamAppend(result)
 	return result.chunk.Size
 }
 
@@ -373,8 +373,7 @@ func (dgr *Dagger) recursivelySplitBuffer(
 			return err
 		}
 
-		if len(dgr.chainedChunkers) > chunkerIdx+1 &&
-			!(c.Meta != nil && c.Meta["nosubchunking"] != nil && c.Meta["nosubchunking"].(bool)) {
+		if len(dgr.chainedChunkers) > chunkerIdx+1 && !c.Meta.Bool("no-subchunking") {
 			// we are not last in the chain - subchunk
 			subSplits := make(chan *recursiveSplitResult, chunkQueueSizeSubchunk)
 			go dgr.recursivelySplitBuffer(
@@ -459,24 +458,22 @@ func (dgr *Dagger) recursivelySplitBuffer(
 	close(recursiveResultsReturn)
 }
 
-func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
+func (dgr *Dagger) streamAppend(res *recursiveSplitResult) {
 
-	var ls dgrblock.LeafSource
+	var ds dgrblock.DataSource
 	var dr *qringbuf.Region
 	var leafLevel int
 	if res != nil {
 		dr = res.chunkBufRegion
-		ls.Chunk = res.chunk
-		ls.Content = zcpstring.NewFromSlice(dr.Bytes())
+		ds.Chunk = res.chunk
+		ds.Content = zcpstring.NewFromSlice(dr.Bytes())
 
-		if ls.Chunk.Meta != nil {
-			if sp, exists := ls.Chunk.Meta["sparse"]; exists && sp.(bool) {
-				leafLevel = 1
-			}
+		if ds.Meta.Bool("is-padding") {
+			leafLevel = 1
 		}
 	}
 
-	hdr := dgr.chainedCollectors[0].AppendLeaf(ls)
+	hdr := dgr.chainedCollectors[0].AppendData(ds)
 
 	if dgr.emitChunks {
 		miniHash := " "
@@ -484,7 +481,7 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 			miniHash = fmt.Sprintf(`, "minihash":"%x"`, *sk)
 		}
 
-		size := int64(ls.Size)
+		size := int64(ds.Size)
 		if leafLevel > 0 {
 			size *= -1
 		}
@@ -504,25 +501,13 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 		}
 	}
 
-	// FIXME - I can't actually turn this on and keep convergence...
-	// if hdr.IsInlined() {
-	// 	if dgr.latestLeafInlined {
-	// 		log.Fatalf(
-	// 			"Two consecutive inlined leaves in stream - this indicates a logic error in chunkers: enable chunk listing to see offending sequence. Exact arguments were: %s",
-	// 			dgr.statSummary.SysStats.ArgvInitial,
-	// 		)
-	// 	}
-	// 	dgr.latestLeafInlined = true
-	// } else {
-	// 	dgr.latestLeafInlined = false
-	// }
+	dgr.curStreamOffset += int64(ds.Size)
 
-	dgr.curStreamOffset += int64(ls.Size)
-
-	// The leaf block processing is entirely decoupled from the collector chain
+	// The leaf block processing is entirely decoupled from the collector chain,
+	// in order to not leak the Region lifetime management outside the framework
 	// Collectors call that same processor on intermediate link nodes they produce
 	dgr.asyncWG.Add(1)
-	go dgr.registerNewBlock(
+	go dgr.postProcessBlock(
 		dgrencoder.NodeOrigin{
 			OriginatingLayer: -1,
 			LocalSubLayer:    leafLevel,
@@ -534,8 +519,8 @@ func (dgr *Dagger) appendLeaf(res *recursiveSplitResult) {
 
 // This function is called as multiple "fire and forget" goroutines
 // It may only try to send an error event, and it should(?) probably log.Fatal on its own
-func (dgr *Dagger) registerNewBlock(
-	origin dgrencoder.NodeOrigin,
+func (dgr *Dagger) postProcessBlock(
+	blockOrigin dgrencoder.NodeOrigin,
 	hdr *dgrblock.Header,
 	dataRegion *qringbuf.Region,
 ) {
@@ -548,8 +533,8 @@ func (dgr *Dagger) registerNewBlock(
 			log.Panic("block header with dag-size of 0 encountered")
 		}
 
-		if origin.OriginatingLayer == 0 {
-			log.Panicf("Unexpected origin spec: %#v", origin)
+		if blockOrigin.OriginatingLayer == 0 {
+			log.Panicf("Unexpected origin spec: %#v", blockOrigin)
 		}
 	}
 
@@ -561,25 +546,13 @@ func (dgr *Dagger) registerNewBlock(
 			dgr.mu.Lock()
 
 			if s, exists := dgr.seenBlocks[*k]; exists {
-				s.seenAt[origin]++
+				s.seenAt[blockOrigin]++
 			} else {
-				var inblockDataSize int
-				if hdr.SizeLinkSection() == 0 {
-					inblockDataSize = int(hdr.SizeCumulativePayload())
+				dgr.seenBlocks[*k] = uniqueBlockStats{
+					sizeBlock:              hdr.SizeBlock(),
+					seenAt:                 seenTimesAt{blockOrigin: 1},
+					blockPostProcessResult: &blockPostProcessResult{},
 				}
-				s := uniqueBlockStats{
-					sizeData:  inblockDataSize, // currently not using this for any stats, but one day...
-					sizeBlock: hdr.SizeBlock(),
-					seenAt:    seenTimesAt{origin: 1},
-				}
-
-				if dgr.uniqueBlockCallback != nil {
-					// Due to how we lock the stats above, we will effectively serialize the callbacks
-					// This is *exactly* what we want
-					s.blockPostProcessResult = dgr.uniqueBlockCallback(hdr)
-				}
-
-				dgr.seenBlocks[*k] = s
 			}
 
 			dgr.mu.Unlock()

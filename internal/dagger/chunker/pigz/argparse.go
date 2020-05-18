@@ -76,5 +76,8 @@ func NewChunker(
 	c.mask = 1<<uint(c.MaskBits) - 1
 	c.minSansPreheat = c.MinSize - c.MaskBits
 
-	return &c, dgrchunker.InstanceConstants{MinChunkSize: c.MinSize}, initErrs
+	return &c, dgrchunker.InstanceConstants{
+		MinChunkSize: c.MinSize,
+		MaxChunkSize: c.MaxSize,
+	}, initErrs
 }

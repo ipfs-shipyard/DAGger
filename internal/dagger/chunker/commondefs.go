@@ -4,10 +4,11 @@ import "github.com/ipfs-shipyard/DAGger/chunker"
 
 type InstanceConstants struct {
 	MinChunkSize int
+	MaxChunkSize int
 }
 
 type DaggerConfig struct {
-	LastInChain bool
+	IsLastInChain bool
 }
 
 type Initializer func(

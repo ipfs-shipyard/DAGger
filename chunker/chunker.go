@@ -14,5 +14,15 @@ type SplitResultCallback func(
 
 type Chunk struct {
 	Size int
-	Meta map[string]interface{}
+	Meta ChunkMeta
+}
+type ChunkMeta map[string]interface{}
+
+func (cm ChunkMeta) Bool(name string) bool {
+	if slot, exists := cm[name]; exists {
+		if val, typeAsserted := slot.(bool); typeAsserted {
+			return val
+		}
+	}
+	return false
 }

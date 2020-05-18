@@ -6,15 +6,16 @@ import (
 )
 
 type Collector interface {
-	AppendLeaf(dgrblock.LeafSource) (resultingLeafBlock *dgrblock.Header)
+	AppendData(formLeafBlockAndAppend dgrblock.DataSource) (resultingLeafBlock *dgrblock.Header)
 	AppendBlock(blockToAppendToStream *dgrblock.Header)
 	FlushState() (rootBlockAfterReducingAndDestroyingObjectState *dgrblock.Header)
 }
 
 type DaggerConfig struct {
-	ChainPosition int // used for layer reconstruction in DAG stats
-	NodeEncoder   dgrencoder.NodeEncoder
-	NextCollector Collector
+	ChunkerChainMaxResult int // used for initialization sanity checks
+	ChainPosition         int // used for DAG-stats layering
+	NodeEncoder           dgrencoder.NodeEncoder
+	NextCollector         Collector
 }
 
 type Initializer func(

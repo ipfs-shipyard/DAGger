@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math"
 	"math/bits"
 	"os"
 	"reflect"
@@ -17,7 +18,7 @@ import (
 )
 
 func VarintWireSize(v uint64) int {
-	if constants.PerformSanityChecks && v >= 1<<63 {
+	if constants.PerformSanityChecks && v > math.MaxInt64 {
 		log.Panicf("Value %#v too large for a varint: https://github.com/multiformats/unsigned-varint#practical-maximum-of-9-bytes-for-security", v)
 	}
 
@@ -57,9 +58,10 @@ type FileHandleOptimization struct {
 }
 
 // This is a surprisingly cheap and reliable way to emulate a part of unsafe.*
-// Use this for various syscalls, not to pull in unsafe and make folks go 😱🙀🤮
+// Use this for various optimization syscalls (in platform-specific util's)
+// Saves us from pulling unsafe proper, which is known to make folks go 😱🙀🤮
 func _addressofref(val interface{}) uintptr {
-	a, _ := strconv.ParseInt(fmt.Sprintf("%p", val), 0, 64)
+	a, _ := strconv.ParseUint(fmt.Sprintf("%p", val), 0, 64)
 	return uintptr(a)
 }
 

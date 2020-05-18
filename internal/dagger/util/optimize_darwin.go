@@ -1,6 +1,7 @@
 package util
 
 import (
+	"math"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -36,12 +37,15 @@ func init() {
 				return nil
 			}
 
-			if s >= 1<<31 {
-				s = 1<<31 - 1
+			if s > math.MaxInt32 {
+				s = math.MaxInt32
 			}
 			_, err := unix.FcntlInt(
 				file.Fd(),
 				unix.F_RDADVISE,
+				// Yes, we are casting an address to an int, because... golang
+				// This shoud be safe, however, as it is immediately recast back to uintptr
+				// https://github.com/golang/sys/blob/417ce2331b/unix/zsyscall_darwin_amd64.go#L714-L715
 				int(_addressofref(&unix.Radvisory_t{
 					Offset: 0,
 					Count:  int32(s),

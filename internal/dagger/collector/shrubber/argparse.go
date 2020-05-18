@@ -1,4 +1,4 @@
-package subbalancer
+package shrubber
 
 import (
 	"fmt"
@@ -62,6 +62,7 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 	}
 
 	co.cidMask = (1 << co.CidMaskBits) - 1
+	co.PadLayerNodes = 3
 
 	return co, initErrs
 }

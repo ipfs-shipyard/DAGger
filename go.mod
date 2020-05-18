@@ -3,6 +3,7 @@ module github.com/ipfs-shipyard/DAGger
 go 1.13
 
 require (
+	github.com/BurntSushi/rure-go v0.0.0-20200220204551-0338b655c065
 	github.com/google/uuid v1.1.1 // indirect
 	github.com/ipfs/go-qringbuf v0.0.0-20200507224714-cba208e861c3
 	github.com/klauspost/compress v1.10.5
@@ -12,7 +13,7 @@ require (
 	github.com/pborman/options v1.1.0
 	github.com/twmb/murmur3 v1.1.3
 	github.com/ulikunitz/xz v0.5.7
-	golang.org/x/crypto v0.0.0-20200429183012-4b2356b1ed79
+	golang.org/x/crypto v0.0.0-20200510223506-06a226fb4e37
 	golang.org/x/exp v0.0.0-20200331195152-e8c3332aa8e5
-	golang.org/x/sys v0.0.0-20200501052902-10377860bb8e
+	golang.org/x/sys v0.0.0-20200515095857-1151b9dac4a9
 )

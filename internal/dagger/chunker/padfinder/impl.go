@@ -2,20 +2,21 @@ package padfinder
 
 import (
 	"github.com/ipfs-shipyard/DAGger/chunker"
+	"github.com/ipfs-shipyard/DAGger/internal/constants"
 )
 
 type config struct {
-	Re2Longest string `getopt:"--re2-longest Stuff"`
+	MaxRunSize       int    `getopt:"--max-pad-run"`
+	StaticMaxLiteral int    `getopt:"--static-pad-literal-max"`
+	StaticMinRepeats int    `getopt:"--static-pad-min-repeats"`
+	StaticPadHex     string `getopt:"--pad-static-hex"`
+	freeFormRE       string
 }
 
 type padfinderPreChunker struct {
-	maxChunkSize int
+	finder  finderInstance
+	padMeta chunker.ChunkMeta
 	config
-}
-
-var sparseMeta map[string]interface{} = map[string]interface{}{
-	"sparse":        true,
-	"nosubchunking": true,
 }
 
 func (c *padfinderPreChunker) Split(
@@ -25,89 +26,52 @@ func (c *padfinderPreChunker) Split(
 ) (err error) {
 
 	postBufIdx := len(buf)
-	var matchOverflow bool
-	var curIdx, padLen int
+	var curIdx, matchStart, matchEnd int
+	var didOverflow bool
 
 	for {
 		// we will be running out of data, but still *could* run a round
 		// abort early if we are allowed to
 		if !useEntireBuffer &&
-			curIdx+2*c.maxChunkSize > postBufIdx {
+			curIdx+2*constants.MaxLeafPayloadSize > postBufIdx {
 			return
 		}
 
-		var m [2]int
-		{
-			minSparseSize := 42
-			firstImpossiblePos := postBufIdx - minSparseSize
-
-			m[0] = curIdx
-			m[1] = m[0]
-
-			for m[1] < firstImpossiblePos &&
-				m[1]-m[0] < minSparseSize {
-
-				if buf[m[1]] != 0 {
-					if buf[m[1]+minSparseSize] != 0 {
-						m[1] += minSparseSize
-					}
-					m[0] = m[1] + 1
-				}
-				m[1]++
-			}
-
-			if m[1]-m[0] >= minSparseSize {
-				// we found something - go forward as much as we can
-				for m[1] < postBufIdx && buf[m[1]] == 0 {
-					m[1]++
-				}
-				m[0] -= curIdx
-				m[1] -= curIdx
-			} else {
-				m[1] = 0
-			}
-		}
-
-		// if m := c.re2.FindIndex(buf[curIdx:]); m != nil && m[1] > 0 {
-		if m[1] > 0 {
+		if matchStart, matchEnd = c.finder.findNext(buf[curIdx:]); matchEnd > 0 {
 			// We did match *somewhere* in the buffer - let's break this down
-			// NOTE: the m[{0,1}] offsets are relative to curIdx as it was at loop start
-			matchOverflow = (curIdx+m[1] >= postBufIdx)
+
+			// NOTE: the match{Start,End} offsets are relative to curIdx as it is NOW
+			didOverflow = (curIdx+matchEnd == postBufIdx)
 
 			// There is some leading non-pad data: pass it down the chain
-			if m[0] != 0 {
-				if err = cb(chunker.Chunk{
-					Size: m[0],
-				}); err != nil {
+			if matchStart != 0 {
+				if err = cb(chunker.Chunk{Size: matchStart}); err != nil {
 					return
 				}
-				curIdx += m[0]
+				curIdx += matchStart
 			}
 
-			padLen = m[1] - m[0]
+			sparseLen := matchEnd - matchStart
 
-			// The pad doesn't fit in a maxchunk: let's keep chopping off "full sparse chunks"
-			for padLen >= c.maxChunkSize {
-				if err = cb(chunker.Chunk{
-					Size: c.maxChunkSize,
-					Meta: sparseMeta,
-				}); err != nil {
+			// loop for identically sized runs
+			for sparseLen >= c.MaxRunSize {
+				if err = c.padSubSplit(c.MaxRunSize, cb); err != nil {
 					return
 				}
-				padLen -= c.maxChunkSize
-				curIdx += c.maxChunkSize
+				sparseLen -= c.MaxRunSize
+				curIdx += c.MaxRunSize
 			}
 
-			// Ok, there is more pad left and it is NOT "trailing off"
-			// Send that too and then we loop and match again
-			if !matchOverflow && padLen > 0 {
-				if err = cb(chunker.Chunk{
-					Size: padLen,
-					Meta: sparseMeta,
-				}); err != nil {
+			if didOverflow && !useEntireBuffer {
+				return
+			}
+
+			// deal with leftover if any
+			if sparseLen > 0 {
+				if err = c.padSubSplit(sparseLen, cb); err != nil {
 					return
 				}
-				curIdx += padLen
+				curIdx += sparseLen
 			}
 
 		} else {
@@ -117,4 +81,40 @@ func (c *padfinderPreChunker) Split(
 			return
 		}
 	}
+}
+
+func (c *padfinderPreChunker) padSubSplit(
+	length int,
+	cb chunker.SplitResultCallback,
+) error {
+
+	// nothing to subsplit
+	if c.StaticPadHex == "" {
+		return cb(chunker.Chunk{
+			Size: length,
+			Meta: c.padMeta,
+		})
+	}
+
+	// start with the shorter "leader", even-sized chunks follow after
+	if (length % c.StaticMaxLiteral) > 0 {
+		if err := cb(chunker.Chunk{
+			Size: length % c.StaticMaxLiteral,
+			Meta: c.padMeta,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// and now the even-sized
+	for i := length / c.StaticMaxLiteral; i > 0; i-- {
+		if err := cb(chunker.Chunk{
+			Size: c.StaticMaxLiteral,
+			Meta: c.padMeta,
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
