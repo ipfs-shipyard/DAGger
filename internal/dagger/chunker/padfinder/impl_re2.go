@@ -1,4 +1,4 @@
-// +build padfinder_re2
+// +build !padfinder_rure
 
 package padfinder
 

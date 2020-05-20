@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/ipfs-shipyard/DAGger/chunker"
-	"github.com/ipfs-shipyard/DAGger/internal/constants"
 	dgrchunker "github.com/ipfs-shipyard/DAGger/internal/dagger/chunker"
 
 	"github.com/ipfs-shipyard/DAGger/internal/dagger/util"
@@ -44,50 +43,16 @@ func NewChunker(
 	}
 
 	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		initErrs = []string{err.Error()}
+	if initErrs = util.ArgParse(args, optSet); len(initErrs) > 0 {
 		return
 	}
 
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
-	}
-
-	if c.MinSize < 1 || c.MinSize > constants.MaxLeafPayloadSize-1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value for 'min-size' in the range [1:%d] must be specified",
-			constants.MaxLeafPayloadSize-1,
-		),
-		)
-	}
-	if c.MaxSize < 1 || c.MaxSize > constants.MaxLeafPayloadSize {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value for 'max-size' in the range [1:%d] must be specified",
-			constants.MaxLeafPayloadSize,
-		),
-		)
-	}
 	if c.MinSize >= c.MaxSize {
 		initErrs = append(initErrs,
 			"value for 'max-size' must be larger than 'min-size'",
 		)
 	}
 
-	if !optSet.IsSet("state-target") {
-		initErrs = append(initErrs,
-			"value for the uint64 'state-target' must be specified",
-		)
-	}
-
-	if c.MaskBits < 8 || c.MaskBits > 22 {
-		initErrs = append(initErrs,
-			"value for 'state-mask-bits' in the range [8:22] must be specified",
-		)
-	}
 	c.mask = 1<<uint(c.MaskBits) - 1
 
 	var exists bool

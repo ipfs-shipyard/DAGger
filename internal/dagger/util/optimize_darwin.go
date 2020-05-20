@@ -13,12 +13,12 @@ func init() {
 	// https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html
 	ReadOptimizations = append(ReadOptimizations, FileHandleOptimization{
 		"F_RDAHEAD",
-		func(file *os.File, stat os.FileInfo) error {
+		func(fh *os.File, stat os.FileInfo) error {
 			if !stat.Mode().IsRegular() {
 				return os.ErrInvalid
 			}
 
-			_, err := unix.FcntlInt(file.Fd(), unix.F_RDAHEAD, 1)
+			_, err := unix.FcntlInt(fh.Fd(), unix.F_RDAHEAD, 1)
 			return err
 		},
 	})
@@ -27,7 +27,7 @@ func init() {
 	// https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html
 	ReadOptimizations = append(ReadOptimizations, FileHandleOptimization{
 		"F_RDADVISE (like POSIX_FADV_WILLNEED)",
-		func(file *os.File, stat os.FileInfo) error {
+		func(fh *os.File, stat os.FileInfo) error {
 			if !stat.Mode().IsRegular() {
 				return os.ErrInvalid
 			}
@@ -41,7 +41,7 @@ func init() {
 				s = math.MaxInt32
 			}
 			_, err := unix.FcntlInt(
-				file.Fd(),
+				fh.Fd(),
 				unix.F_RDADVISE,
 				// Yes, we are casting an address to an int, because... golang
 				// This shoud be safe, however, as it is immediately recast back to uintptr

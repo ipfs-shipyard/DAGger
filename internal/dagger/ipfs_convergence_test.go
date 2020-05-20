@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/exp/rand"
-
 	"github.com/ipfs-shipyard/DAGger/internal/constants"
 )
 
@@ -36,9 +34,6 @@ func TestGoIpfsConvergence(t *testing.T) {
 			"--multipart",
 		}
 		baselen := len(args)
-
-		if !constants.VeryLongTests && rand.Intn(2) == 1 {
-		}
 
 		args = append(args, "--ipfs-add-compatible-command")
 		args = append(args, cmd)

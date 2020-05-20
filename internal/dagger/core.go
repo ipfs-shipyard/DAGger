@@ -1,6 +1,8 @@
 package dagger
 
 import (
+	"io"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -51,7 +53,10 @@ type dgrChunkerUnit struct {
 	constants dgrchunker.InstanceConstants
 }
 
-type uniqueBlockCallback func(*dgrblock.Header)
+type carUnit struct {
+	hdr    *dgrblock.Header
+	region *qringbuf.Region
+}
 
 type Dagger struct {
 	// speederization shortcut flags for internal logic
@@ -71,6 +76,12 @@ type Dagger struct {
 	mu                sync.Mutex
 	seenBlocks        seenBlocks
 	seenRoots         seenRoots
+	carDataQueue      chan carUnit
+	carWriteError     chan error
+	carDataWriter     io.Writer
+	carFifoDirectory  string
+	carFifoData       *os.File
+	carFifoPins       *os.File
 }
 
 func (dgr *Dagger) Destroy() {

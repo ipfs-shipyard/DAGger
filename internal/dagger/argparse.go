@@ -46,22 +46,22 @@ type config struct {
 	erroredNodeEncoders []string
 
 	// 34 bytes is the largest identity CID that fits in 63 chars (dns limit) of b-prefixed base32 encoding
-	InlineMaxSize      int `getopt:"--inline-max-size          Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
-	AsyncHashers       int `getopt:"--async-hashers            Number of concurrent short-lived goroutines performing hashing. Set to 0 (disable) for predictable benchmarking. Default:"`
-	RingBufferSize     int `getopt:"--ring-buffer-size         The size of the quantized ring buffer used for ingestion. Default:"`
-	RingBufferSectSize int `getopt:"--ring-buffer-sync-size    (EXPERT SETTING) The size of each buffer synchronization sector. Default:"` // option vaguely named 'sync' to not confuse users
-	RingBufferMinRead  int `getopt:"--ring-buffer-min-sysread  (EXPERT SETTING) Perform next read(2) only when the specified amount of free space is available in the buffer. Default:"`
+	InlineMaxSize      int `getopt:"--inline-max-size=bytes         Use identity-CID to refer to blocks having on-wire size at or below the specified value (34 is recommended), 0 disables"`
+	AsyncHashers       int `getopt:"--async-hashers=integer         Number of concurrent short-lived goroutines performing hashing. Set to 0 (disable) for predictable benchmarking. Default:"`
+	RingBufferSize     int `getopt:"--ring-buffer-size=bytes        The size of the quantized ring buffer used for ingestion. Default:"`
+	RingBufferSectSize int `getopt:"--ring-buffer-sync-size=bytes   (EXPERT SETTING) The size of each buffer synchronization sector. Default:"` // option vaguely named 'sync' to not confuse users
+	RingBufferMinRead  int `getopt:"--ring-buffer-min-sysread=bytes (EXPERT SETTING) Perform next read(2) only when the specified amount of free space is available in the buffer. Default:"`
 
-	StatsActive int `getopt:"--stats-active  An integer representing enabled stat aggregations: bit0:BlockSizing, bit1:RingbufferTiming. Default:"`
+	StatsActive uint `getopt:"--stats-active=uint   A bitfield representing activated stat aggregations: bit0:BlockSizing, bit1:RingbufferTiming. Default:"`
 
-	HashBits int    `getopt:"--hash-bits Amount of bits taken from *start* of the hash output. Default:"`
+	HashBits int    `getopt:"--hash-bits=integer Amount of bits taken from *start* of the hash output. Default:"`
 	hashFunc string // hash function to use: option/helptext in initArgvParser()
 
 	requestedChunkers    string // Chunker chain: option/helptext in initArgvParser()
 	requestedCollectors  string // Collector chain: option/helptext in initArgvParser()
 	requestedNodeEncoder string // The global (for now) node=>block encoder: option/helptext in initArgvParser
 
-	IpfsCompatCmd string `getopt:"--ipfs-add-compatible-command A complete go-ipfs/js-ipfs add command serving as a basis config (any conflicting option will take precedence)"`
+	IpfsCompatCmd string `getopt:"--ipfs-add-compatible-command=cmdstring A complete go-ipfs/js-ipfs add command serving as a basis config (any conflicting option will take precedence)"`
 }
 
 const (
@@ -69,16 +69,16 @@ const (
 	statsRingbuf
 )
 
-type emissionTargets map[string]io.WriteCloser
+type emissionTargets map[string]io.Writer
 
 const (
-	emNone                = "none"
-	emStatsText           = "stats-text"
-	emStatsJsonl          = "stats-jsonl"
-	emRootsJsonl          = "roots-jsonl"
-	emChunksJsonl         = "chunks-jsonl"
-	emCarV0Fifos          = "car-v0-fifos"
-	emCarV0RootlessStream = "car-v0-rootless-stream"
+	emNone               = "none"
+	emStatsText          = "stats-text"
+	emStatsJsonl         = "stats-jsonl"
+	emRootsJsonl         = "roots-jsonl"
+	emChunksJsonl        = "chunks-jsonl"
+	emCarV0Fifos         = "car-v0-fifos-xargs"
+	emCarV0PinlessStream = "car-v0-pinless-stream"
 )
 
 // where the CLI initial error messages go
@@ -107,13 +107,13 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 
 			// not defaults but rather the list of known/configured emitters
 			emitters: emissionTargets{
-				emNone:                nil,
-				emStatsText:           nil,
-				emStatsJsonl:          nil,
-				emRootsJsonl:          nil,
-				emChunksJsonl:         nil,
-				emCarV0Fifos:          nil,
-				emCarV0RootlessStream: nil,
+				emNone:               nil,
+				emStatsText:          nil,
+				emStatsJsonl:         nil,
+				emRootsJsonl:         nil,
+				emChunksJsonl:        nil,
+				emCarV0Fifos:         nil,
+				emCarV0PinlessStream: nil,
 			},
 		},
 	}
@@ -133,27 +133,19 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 
 	cfg := &dgr.cfg
 	cfg.initArgvParser()
-	cfg.optSet.Parse(argv)
+
+	// accumulator for multiple errors, to present to the user all at once
+	argParseErrs := util.ArgParse(argv, cfg.optSet)
+
 	if cfg.Help || cfg.HelpAll {
 		cfg.printUsage()
 		os.Exit(0)
 	}
 
-	// accumulator for multiple errors, to present to the user all at once
-	var argErrs []string
-
-	unexpectedArgs := cfg.optSet.Args()
-	if len(unexpectedArgs) != 0 {
-		argErrs = append(argErrs, fmt.Sprintf(
-			"Program does not take free-form arguments: '%s ...'",
-			unexpectedArgs[0],
-		))
-	}
-
 	// pre-populate from a compat `ipfs add` command if one was supplied
 	if cfg.optSet.IsSet("ipfs-add-compatible-command") {
 		if errStrings := cfg.presetFromIPFS(); len(errStrings) > 0 {
-			argErrs = append(argErrs, errStrings...)
+			argParseErrs = append(argParseErrs, errStrings...)
 		}
 	}
 
@@ -167,18 +159,18 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 
 	// has a default
 	if cfg.HashBits < 128 || (cfg.HashBits%8) != 0 {
-		argErrs = append(argErrs, "The value of --hash-bits must be a minimum of 128 and be divisible by 8")
+		argParseErrs = append(argParseErrs, "The value of --hash-bits must be a minimum of 128 and be divisible by 8")
 	}
 
 	if !cfg.optSet.IsSet("inline-max-size") &&
 		!cfg.optSet.IsSet("ipfs-add-compatible-command") &&
 		cfg.requestedCollectors != "none" {
-		argErrs = append(argErrs, "You must specify a valid value for --inline-max-size")
+		argParseErrs = append(argParseErrs, "You must specify a valid value for --inline-max-size")
 	} else if cfg.InlineMaxSize < 0 ||
 		(cfg.InlineMaxSize > 0 && cfg.InlineMaxSize < 4) ||
 		cfg.InlineMaxSize > constants.MaxLeafPayloadSize {
 		// https://github.com/multiformats/cid/issues/21
-		argErrs = append(argErrs, fmt.Sprintf(
+		argParseErrs = append(argParseErrs, fmt.Sprintf(
 			"--inline-max-size '%s' out of bounds 0 or [4:%d]",
 			util.Commify(cfg.InlineMaxSize),
 			constants.MaxLeafPayloadSize,
@@ -188,25 +180,25 @@ func NewFromArgv(argv []string) (dgr *Dagger) {
 	// Parses/creates the blockmaker/nodeencoder, to pass in turn to the collector chain
 	// Not stored in the dgr object itself, to cut down on logic leaks
 	nodeEnc, errorMessages := dgr.setupEncoding()
-	argErrs = append(argErrs, errorMessages...)
-	argErrs = append(argErrs, dgr.setupChunkerChain()...)
-	argErrs = append(argErrs, dgr.setupCollectorChain(nodeEnc)...)
-	argErrs = append(argErrs, dgr.setupEmitters()...)
+	argParseErrs = append(argParseErrs, errorMessages...)
+	argParseErrs = append(argParseErrs, dgr.setupChunkerChain()...)
+	argParseErrs = append(argParseErrs, dgr.setupCollectorChain(nodeEnc)...)
+	argParseErrs = append(argParseErrs, dgr.setupEmitters()...)
 
 	// Opts check out - set up the car emitter
-	if len(argErrs) == 0 {
-		argErrs = append(argErrs, dgr.setupCarWriting()...)
+	if len(argParseErrs) == 0 {
+		argParseErrs = append(argParseErrs, dgr.setupCarWriting()...)
 	}
 
-	if len(argErrs) != 0 {
+	if len(argParseErrs) != 0 {
 		fmt.Fprint(argParseErrOut, "\nFatal error parsing arguments:\n\n")
 		cfg.printUsage()
 
-		sort.Strings(argErrs)
+		sort.Strings(argParseErrs)
 		fmt.Fprintf(
 			argParseErrOut,
 			"Fatal error parsing arguments:\n\t%s\n",
-			strings.Join(argErrs, "\n\t"),
+			strings.Join(argParseErrs, "\n\t"),
 		)
 		os.Exit(1)
 	}
@@ -341,8 +333,8 @@ func (cfg *config) initArgvParser() {
 	o.SetParameters("")
 
 	// Several options have the help-text assembled programmatically
-	o.FlagLong(&cfg.hashFunc, "hash", 0, "Hash function to use, one of: "+
-		util.AvailableMapKeys(dgrblock.AvailableHashers),
+	o.FlagLong(&cfg.hashFunc, "hash", 0, "Hash function to use, one of: "+util.AvailableMapKeys(dgrblock.AvailableHashers),
+		"string",
 	)
 	o.FlagLong(&cfg.requestedNodeEncoder, "node-encoder", 0, "The IPLD-ish node encoder to use, one of: "+util.AvailableMapKeys(availableNodeEncoders),
 		"'encname_opt1_opt2_..._optN",
@@ -371,7 +363,10 @@ func (dgr *Dagger) setupEmitters() (argErrs []string) {
 	for _, s := range dgr.cfg.emittersStdErr {
 		activeStderr[s] = true
 		if val, exists := dgr.cfg.emitters[s]; !exists {
-			argErrs = append(argErrs, fmt.Sprintf("Invalid emitter '%s' specified with --emit-stderr", s))
+			argErrs = append(argErrs, fmt.Sprintf("invalid emitter '%s' specified for --emit-stderr. Available emitters are: %s",
+				s,
+				util.AvailableMapKeys(dgr.cfg.emitters),
+			))
 		} else if s == emNone {
 			continue
 		} else if val != nil {
@@ -384,7 +379,10 @@ func (dgr *Dagger) setupEmitters() (argErrs []string) {
 	for _, s := range dgr.cfg.emittersStdOut {
 		activeStdout[s] = true
 		if val, exists := dgr.cfg.emitters[s]; !exists {
-			argErrs = append(argErrs, fmt.Sprintf("Invalid emitter '%s' specified for --emit-stdout", s))
+			argErrs = append(argErrs, fmt.Sprintf("invalid emitter '%s' specified for --emit-stdout. Available emitters are: %s",
+				s,
+				util.AvailableMapKeys(dgr.cfg.emitters),
+			))
 		} else if s == emNone {
 			continue
 		} else if val != nil {
@@ -398,7 +396,7 @@ func (dgr *Dagger) setupEmitters() (argErrs []string) {
 		emNone,
 		emStatsText,
 		emCarV0Fifos,
-		emCarV0RootlessStream,
+		emCarV0PinlessStream,
 	} {
 		if activeStderr[exclusiveEmitter] && len(activeStderr) > 1 {
 			argErrs = append(argErrs, fmt.Sprintf(
@@ -423,31 +421,51 @@ func (dgr *Dagger) setupEmitters() (argErrs []string) {
 
 func (dgr *Dagger) setupCarWriting() (argErrs []string) {
 
-	if dgr.cfg.emitters[emCarV0Fifos] == nil && dgr.cfg.emitters[emCarV0RootlessStream] == nil {
+	var carSelectedOut io.Writer
+
+	// we already checked that only one is set
+	if dgr.cfg.emitters[emCarV0Fifos] != nil {
+		carSelectedOut = dgr.cfg.emitters[emCarV0Fifos]
+	} else if dgr.cfg.emitters[emCarV0PinlessStream] != nil {
+		carSelectedOut = dgr.cfg.emitters[emCarV0PinlessStream]
+	} else {
 		return
 	}
 
-	// for _, carType := range []string{
-	// 	emCarV0Fifos,
-	// 	emCarV0RootlessStream,
-	// } {
-	// 	if dgr.cfg.emitters[carType] != nil {
+	if (dgr.cfg.StatsActive & statsBlocks) != statsBlocks {
+		argErrs = append(argErrs, "disabling blockstat collection conflicts with streaming .car data")
+	}
 
-	// 		if (dgr.cfg.StatsActive & statsBlocks) != statsBlocks {
-	// 			argErrs = append(argErrs, fmt.Sprintf(
-	// 				"disabling blockstat collection conflicts with selected emitter '%s'",
-	// 				carType,
-	// 			))
-	// 			return
-	// 		}
+	if util.IsTTY(carSelectedOut) {
+		argErrs = append(argErrs, "output of .car streams to a TTY is prohibited")
+	}
 
-	// 		if carType == emCarV0Fifos {
-	// 			// dgr.uniqueBlockCallback = func(hdr *dgrblock.Header, _ *blockPostProcessResult) {
+	if len(argErrs) > 0 {
+		return
+	}
 
-	// 			// }
-	// 		}
-	// 	}
-	// }
+	if dgr.cfg.emitters[emCarV0PinlessStream] != nil {
+		dgr.carDataWriter = carSelectedOut
+
+		if f, isFh := carSelectedOut.(*os.File); isFh {
+			if s, err := f.Stat(); err != nil {
+				log.Printf("Failed to stat() the car stream output: %s", err)
+			} else {
+				for _, opt := range util.WriteOptimizations {
+					if err := opt.Action(f, s); err != nil && err != os.ErrInvalid {
+						log.Printf("Failed to apply write optimization hint '%s' to car stream output: %s\n", opt.Name, err)
+					}
+				}
+			}
+		}
+
+		return
+	}
+
+	// we are in fifo-land
+	if err := dgr.initOptimizedCarFifos(); err != nil {
+		argErrs = append(argErrs, err.Error())
+	}
 
 	return
 }

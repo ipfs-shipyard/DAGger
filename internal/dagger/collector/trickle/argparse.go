@@ -39,31 +39,8 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 	}
 
 	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		initErrs = []string{err.Error()}
+	if initErrs = util.ArgParse(args, optSet); len(initErrs) > 0 {
 		return
-	}
-
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
-	}
-
-	if co.MaxDirectLeaves < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-direct-leaves' %d is out of range [1:...]",
-			co.MaxDirectLeaves,
-		))
-	}
-
-	if co.MaxSiblingSubgroups < 1 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"value of 'max-sibling-subgroups' %d is out of range [1:...]",
-			co.MaxSiblingSubgroups,
-		))
 	}
 
 	if co.NextCollector != nil {
@@ -73,7 +50,7 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 		)
 	}
 
-	// allocate space for ~8mil nodes (usually the result is 6 or7)
+	// allocate space for ~8mil nodes (usually the result is 6 or 7)
 	co.descentPrealloc = int(math.Ceil(
 		math.Log((1<<23)/float64(co.MaxDirectLeaves)) / math.Log(1+float64(co.MaxSiblingSubgroups)),
 	))

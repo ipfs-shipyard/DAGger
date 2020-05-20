@@ -11,14 +11,15 @@ import (
 )
 
 type config struct {
-	MaxPayload    int `getopt:"--max-payload   FIXME Maximum payload size in each node. To skip payload-based balancing, set this to 0."`
-	PadLayerNodes int `getopt:"--pad-layer-nodes  FIXME LS"`
-	CidMaskBits   int `getopt:"--cid-tail-mask-bits FIXME Amount of bits from the end of a cryptographic Cid to compare of state to compare to target on every iteration. For random input average chunk size is about 2**m"`
-	CidTailTarget int `getopt:"--cid-tail-target    FIXME State value denoting a chunk boundary"`
-	MinSubgroup   int `getopt:"--min-subgroup  FIXME The minimum amount of nodes clustered together before employing CID-based subgrouping"`
+	MaxPayload          int `getopt:"--max-payload=[0:MaxPayload]   FIXME Maximum payload size in each node. To skip payload-based balancing, set this to 0."`
+	RepeaterLayerNodes  int `getopt:"--static-pad-repeater-nodes=[1:]  FIXME LS"`
+	SubgroupCidMaskBits int `getopt:"--cid-subgroup-mask-bits=[4:16] FIXME Amount of bits from the end of a cryptographic Cid to compare of state to compare to target on every iteration. For random input average chunk size is about 2**m"`
+	SubgroupCidTarget   int `getopt:"--cid-subgroup-target=[0:]    FIXME State value denoting a chunk boundary, check against mask"`
+	SubgroupCidMinNodes int `getopt:"--cid-subgroup-min-nodes=[0:]  FIXME The minimum amount of nodes clustered together before employing CID-based subgrouping. 0 disables "`
 }
 type collector struct {
-	cidMask int
+	cidMask       uint16
+	cidTailTarget uint16
 	config
 	sumPayload uint64
 	padCluster struct {
@@ -134,13 +135,13 @@ func (co *collector) AppendBlock(newHdr *dgrblock.Header) {
 		}
 	}
 
-	if len(co.stack) > co.MinSubgroup+1 {
+	if len(co.stack) > co.SubgroupCidMinNodes {
 
 		tgtIdx := len(co.stack) - 1
 		tgtBlock := co.stack[tgtIdx]
 		tgtCid := tgtBlock.Cid()
 
-		if (int(binary.BigEndian.Uint16(tgtCid[len(tgtCid)-2:])) & co.cidMask) == co.CidTailTarget {
+		if (binary.BigEndian.Uint16(tgtCid[len(tgtCid)-2:]) & co.cidMask) == co.cidTailTarget {
 
 			// fmt.Printf("\t\tMatch %s\n", tgtBlock.CidBase32())
 			linkHdr := co.NodeEncoder.NewLink(
@@ -177,10 +178,10 @@ func (co *collector) flushPadding() {
 		return
 	}
 
-	finBlocks := make([]*dgrblock.Header, 0, len(pbs)*co.PadLayerNodes)
+	finBlocks := make([]*dgrblock.Header, 0, len(pbs)*co.RepeaterLayerNodes)
 
 	expBlocks := make([]*dgrblock.Header, 0, 7)
-	expNext := make([]*dgrblock.Header, 0, co.PadLayerNodes)
+	expNext := make([]*dgrblock.Header, 0, co.RepeaterLayerNodes)
 
 	for pi := 0; pi < len(pbs); pi++ {
 		if pbs[pi].repeat == 1 {
@@ -198,21 +199,21 @@ func (co *collector) flushPadding() {
 			curLevelCount := 1
 			// don't drag in float64/Pow() just for this
 			for i := len(expBlocks); i > 1; i-- {
-				curLevelCount *= co.PadLayerNodes
+				curLevelCount *= co.RepeaterLayerNodes
 			}
 
 			// keep proceeding to next-level expBlocks as long as we can use at least 2 of them
 			// ( using a highest level exp-block only once does not gain anything )
-			if count >= (2 * curLevelCount * co.PadLayerNodes) {
+			if count >= (2 * curLevelCount * co.RepeaterLayerNodes) {
 
 				// use current exp-block as many times as remains from next-level
-				for i := (count % (curLevelCount * co.PadLayerNodes)) / curLevelCount; i > 0; i-- {
+				for i := (count % (curLevelCount * co.RepeaterLayerNodes)) / curLevelCount; i > 0; i-- {
 					finBlocks = append(finBlocks, expBlocks[len(expBlocks)-1])
 				}
 
 				// assemble next exp-block
 				expNext = expNext[:0]
-				for i := co.PadLayerNodes; i > 0; i-- {
+				for i := co.RepeaterLayerNodes; i > 0; i-- {
 					expNext = append(expNext, expBlocks[len(expBlocks)-1])
 				}
 				expBlocks = append(expBlocks, co.NodeEncoder.NewLink(

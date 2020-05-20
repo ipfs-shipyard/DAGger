@@ -1,10 +1,13 @@
 package dagger
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 
 // SANCHECK: not sure if any of these make sense, nor have I measured the cost
 const (
+	carQueueSize           = 2048
 	chunkQueueSizeTop      = 256
 	chunkQueueSizeSubchunk = 32
 )
@@ -49,15 +53,71 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 	var t0 time.Time
 
 	defer func() {
-		// we need to finish all emissions to complete before we measure/return
+
+		// a little helper to deal with error stack craziness
+		deferErrors := make(chan error, 1)
+
+		// if we are already in error - just put it on the channel
+		// we already sent the event earlier
+		if err != nil {
+			deferErrors <- err
+		}
+
+		// keep sending out events but keep only 1 error to return synchronously
+		addErr := func(e error) {
+			if e != nil {
+				dgr.maybeSendEvent(ErrorString, e.Error())
+				select {
+				case deferErrors <- e:
+				default:
+				}
+			}
+		}
+
+		// we need to wait all crunching to complete, then shutdown emitter, then measure/return
 		dgr.asyncWG.Wait()
+
+		// we are writing data: need to wait/close things
+		if dgr.carDataQueue != nil {
+
+			close(dgr.carDataQueue)     // signal data-write stop
+			addErr(<-dgr.carWriteError) // wait for data-write stop
+
+			// This means we are using fifos, which in turn
+			// means we got to close them in sequence and cleanup
+			// (we got to close only things we opened, not STDOUT/ERR)
+			if dgr.carFifoPins != nil {
+
+				addErr(dgr.carFifoData.Close())
+
+				// If we are already in error, or there are no cars: write the dummy header
+				// ( and hope for the best / that we won't hang ... )
+				if len(deferErrors) > 0 || len(dgr.seenRoots) == 0 {
+					// FIXME - go-ipfs should accept a zero-len without an error...?
+					// i.e. just closing should be ok some day
+					io.WriteString(dgr.carFifoPins, dgrblock.NulRootCarHeader)
+				} else {
+					addErr(dgr.writeoutCarPins())
+				}
+
+				addErr(dgr.carFifoPins.Close())
+				addErr(os.RemoveAll(dgr.carFifoDirectory))
+			}
+		}
+
+		if err == nil && len(deferErrors) > 0 {
+			err = <-deferErrors
+		}
+
 		if postProcessTasks != nil {
 			postProcessTasks(dgr)
 		}
+
 		dgr.qrb = nil
 		if dgr.externalEventBus != nil {
 			close(dgr.externalEventBus)
 		}
+
 		dgr.statSummary.SysStats.ElapsedNsecs = time.Since(t0).Nanoseconds()
 	}()
 
@@ -89,8 +149,7 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 	}
 	t0 = time.Now()
 
-	var initErr error
-	dgr.qrb, initErr = qringbuf.NewFromReader(inputReader, qringbuf.Config{
+	dgr.qrb, err = qringbuf.NewFromReader(inputReader, qringbuf.Config{
 		// MinRegion must be twice the maxchunk, otherwise chunking chains won't work (hi, Claude Shannon)
 		MinRegion:   2 * constants.MaxLeafPayloadSize,
 		MinRead:     dgr.cfg.RingBufferMinRead,
@@ -100,8 +159,38 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 		Stats:       &dgr.statSummary.SysStats.Stats,
 		TrackTiming: ((dgr.cfg.StatsActive & statsRingbuf) == statsRingbuf),
 	})
-	if initErr != nil {
-		return initErr
+	if err != nil {
+		return
+	}
+
+	// Spew the nul-delimited names and close
+	if dgr.cfg.emitters[emCarV0Fifos] != nil {
+		if _, err = fmt.Fprintf(
+			dgr.cfg.emitters[emCarV0Fifos],
+			"%s\x00%s\x00",
+			dgr.carFifoData.Name(),
+			dgr.carFifoPins.Name(),
+		); err != nil {
+			return
+		}
+
+		if err = dgr.cfg.emitters[emCarV0Fifos].(*os.File).Close(); err != nil {
+			return
+		}
+	}
+
+	// We got that far - got to write out the data portion prequel
+	// .oO( The machine of a dream, such a clean machine
+	//      With the pistons a pumpin', and the hubcaps all gleam )
+	if dgr.carDataWriter != nil {
+		if _, err = io.WriteString(dgr.carDataWriter, dgrblock.NulRootCarHeader); err != nil {
+			return
+		}
+
+		// start the async writer here, once we know nothing errorred
+		dgr.carDataQueue = make(chan carUnit, carQueueSize)
+		dgr.carWriteError = make(chan error, 1)
+		go dgr.backgroundCarDataWriter()
 	}
 
 	if (dgr.cfg.StatsActive & statsBlocks) == statsBlocks {
@@ -218,6 +307,120 @@ func (dgr *Dagger) ProcessReader(inputReader io.Reader, optionalEventChan chan<-
 		}
 	}
 
+	return
+}
+
+func (dgr *Dagger) backgroundCarDataWriter() {
+	defer close(dgr.carWriteError)
+
+	var err error
+	var cid, sizeVI []byte
+
+	for {
+		carUnit, chanOpen := <-dgr.carDataQueue
+		if !chanOpen {
+			return
+		}
+
+		cid = carUnit.hdr.Cid()
+		sizeVI = util.AppendVarint(
+			sizeVI[:0],
+			uint64(len(cid)+carUnit.hdr.SizeBlock()),
+		)
+
+		if _, err = dgr.carDataWriter.Write(sizeVI); err == nil {
+			if _, err = dgr.carDataWriter.Write(cid); err == nil {
+				_, err = carUnit.hdr.Content().WriteTo(dgr.carDataWriter)
+			}
+		}
+
+		carUnit.hdr.EvictContent()
+		if carUnit.region != nil {
+			carUnit.region.Release()
+		}
+
+		if err != nil {
+			dgr.maybeSendEvent(ErrorString, err.Error())
+			dgr.carWriteError <- err
+			return
+		}
+	}
+}
+
+func (dgr *Dagger) writeoutCarPins() (err error) {
+	if len(dgr.seenRoots) == 0 {
+		log.Panic("called with 0 seen roots, not possible")
+	}
+
+	var cidCumulativeLength uint64
+
+	sortedCids := make([][]byte, 0, len(dgr.seenRoots))
+
+	for _, c := range dgr.seenRoots {
+		sortedCids = append(sortedCids, c)
+		cidCumulativeLength += uint64(
+			2 + // prefixed tag 42
+				util.CborHeaderWiresize(uint64(len(c))+1) + // that many raw bytes follow
+				1 + // the \x00 cid prefix
+				len(c),
+		)
+	}
+
+	sort.Slice(sortedCids, func(i, j int) bool {
+		return (bytes.Compare(sortedCids[i], sortedCids[j]) < 0)
+	})
+
+	//
+	// Writeout starts here
+	//
+
+	// Roots preamble as varint length
+	if _, err = dgr.carFifoPins.Write(util.VarintSlice(
+		7 +
+			uint64(util.CborHeaderWiresize(uint64(len(sortedCids)))) +
+			cidCumulativeLength +
+			9,
+	)); err != nil {
+		return
+	}
+
+	// See definition of NulRootCarHeader for detailed description of each byte
+	if _, err = io.WriteString(dgr.carFifoPins, "\xA2\x65\x72\x6F\x6F\x74\x73"); err != nil {
+		return
+	}
+
+	// Writeout root array header
+	if err = util.CborHeaderWrite(
+		dgr.carFifoPins,
+		4,
+		uint64(len(sortedCids)),
+	); err != nil {
+		return
+	}
+
+	for i := range sortedCids {
+		if _, err = dgr.carFifoPins.Write([]byte{0xd8, 0x2a}); err != nil {
+			return
+		}
+
+		if err = util.CborHeaderWrite(
+			dgr.carFifoPins,
+			2,
+			uint64(1+len(sortedCids[i])),
+		); err != nil {
+			return
+		}
+
+		if _, err = dgr.carFifoPins.Write([]byte{0}); err != nil {
+			return
+		}
+		if _, err = dgr.carFifoPins.Write(sortedCids[i]); err != nil {
+			return
+		}
+	}
+
+	// Version header outro
+	_, err = io.WriteString(dgr.carFifoPins, "\x67\x76\x65\x72\x73\x69\x6F\x6E\x01")
 	return
 }
 
@@ -543,32 +746,52 @@ func (dgr *Dagger) postProcessBlock(
 
 	if hdr.SizeBlock() > 0 && dgr.seenBlocks != nil {
 		if k := seenKey(hdr); k != nil {
+
+			var postprocSlot *blockPostProcessResult
+
 			dgr.mu.Lock()
 
 			if s, exists := dgr.seenBlocks[*k]; exists {
 				s.seenAt[blockOrigin]++
 			} else {
+				postprocSlot = &blockPostProcessResult{}
 				dgr.seenBlocks[*k] = uniqueBlockStats{
 					sizeBlock:              hdr.SizeBlock(),
 					seenAt:                 seenTimesAt{blockOrigin: 1},
-					blockPostProcessResult: &blockPostProcessResult{},
+					blockPostProcessResult: postprocSlot,
 				}
 			}
 
 			dgr.mu.Unlock()
+
+			if postprocSlot != nil {
+
+				//
+				// FIXME compressor stuff goes here
+				//
+
+				if dgr.carDataQueue != nil {
+					dgr.carDataQueue <- carUnit{hdr: hdr, region: dataRegion}
+					return
+				}
+			}
 		}
 	}
 
-	// Ensure we are finished generating a CID before eviction
-	// FIXME - there should be a mechanism to signal we will never
-	// need the CID in the first place, so that no effort is spent
-	hdr.Cid()
+	// NOTE - these 3 steps will be done by the car emitter ( early return above )
+	// if that's what the options ask for
+	{
+		// Ensure we are finished generating a CID before eviction
+		// FIXME - there should be a mechanism to signal we will never
+		// need the CID in the first place, so that no effort is spent
+		hdr.Cid()
 
-	// If we are holding parts of the qringbuf - we can drop them now
-	if dataRegion != nil {
-		dataRegion.Release()
+		// If we are holding parts of the qringbuf - we can drop them now
+		if dataRegion != nil {
+			dataRegion.Release()
+		}
+
+		// Once we processed a block in this function - dump all of its content too
+		hdr.EvictContent()
 	}
-
-	// Once we processed a block in this function - dump all of its content too
-	hdr.EvictContent()
 }

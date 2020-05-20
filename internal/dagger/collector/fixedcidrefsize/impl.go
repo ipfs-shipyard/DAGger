@@ -7,7 +7,7 @@ import (
 )
 
 type config struct {
-	MaxCidRefSize int `getopt:"--max-cid-refs-size  Maximum cumulative bytes of CID referencess within a node"`
+	MaxCidRefSize int `getopt:"--max-cid-refs-size=[72:]  Maximum cumulative byte-size of CID references within a node"`
 }
 type state struct {
 	stack []*layer

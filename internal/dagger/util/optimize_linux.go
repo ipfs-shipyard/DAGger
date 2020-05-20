@@ -15,13 +15,13 @@ func init() {
 	// Background: https://github.com/afborchert/pipebuf#related-discussions
 	ReadOptimizations = append(ReadOptimizations, FileHandleOptimization{
 		"F_SETPIPE_SZ",
-		func(file *os.File, stat os.FileInfo) (err error) {
+		func(fh *os.File, stat os.FileInfo) (err error) {
 			if 0 == (stat.Mode() & os.ModeNamedPipe) {
 				return os.ErrInvalid
 			}
 
 			for pipeSize := 32 * 1024 * 1024; pipeSize > 512; pipeSize /= 2 {
-				if _, err = unix.FcntlInt(file.Fd(), unix.F_SETPIPE_SZ, pipeSize); err == nil {
+				if _, err = unix.FcntlInt(fh.Fd(), unix.F_SETPIPE_SZ, pipeSize); err == nil {
 					return
 				}
 			}

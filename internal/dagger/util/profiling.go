@@ -25,10 +25,10 @@ func setupProfiling() (profilingStopper func()) {
 	}
 
 	pathPrefix := profileOutDir + "/" + time.Now().Format("2006-01-02_15-04-05.000")
-	var openHandles []*os.File
+	var toFlush []*os.File
 
-	cpuProfFh := openProfHandle("cpu", pathPrefix, &openHandles)
-	allocsProfFh := openProfHandle("allocs", pathPrefix, &openHandles)
+	cpuProfFh := openProfHandle("cpu", pathPrefix, &toFlush)
+	allocsProfFh := openProfHandle("allocs", pathPrefix, &toFlush)
 
 	runtime.GC() // recommended by https://golang.org/pkg/runtime/pprof/#hdr-Profiling_a_Go_program
 	runtime.GC() // recommended harder by @warpfork and @kubuxu :cryingbear:
@@ -54,7 +54,7 @@ func setupProfiling() (profilingStopper func()) {
 			)
 		}
 
-		for _, fh := range openHandles {
+		for _, fh := range toFlush {
 			if err := fh.Close(); err != nil {
 				log.Printf(
 					"Closing %s failed: %s",
@@ -66,7 +66,7 @@ func setupProfiling() (profilingStopper func()) {
 	}
 }
 
-func openProfHandle(profName string, pathPrefix string, openHandles *[]*os.File) (fh *os.File) {
+func openProfHandle(profName string, pathPrefix string, toFlush *[]*os.File) (fh *os.File) {
 	filename := fmt.Sprintf("%s_%s.prof", pathPrefix, profName)
 
 	var err error
@@ -97,7 +97,7 @@ func openProfHandle(profName string, pathPrefix string, openHandles *[]*os.File)
 		),
 	)
 
-	*openHandles = append(*openHandles, fh)
+	*toFlush = append(*toFlush, fh)
 
 	return fh
 }

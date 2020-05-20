@@ -41,8 +41,7 @@ func NewChunker(
 	}
 
 	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		initErrs = []string{err.Error()}
+	if initErrs = util.ArgParse(args, optSet); len(initErrs) > 0 {
 		return
 	}
 
@@ -50,7 +49,6 @@ func NewChunker(
 		"no-subchunking": true,
 		"is-padding":     true,
 	}
-
 	var regexes []string
 
 	if c.freeFormRE != "" {

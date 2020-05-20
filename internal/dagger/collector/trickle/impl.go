@@ -9,9 +9,9 @@ import (
 )
 
 type config struct {
-	UnixfsNulLeafCompat bool `getopt:"--unixfs-nul-leaf-compat Flag to force convergence with go-ipfs *specifically* when encoding a 0-length stream (override encoder leaf-type)"`
-	MaxDirectLeaves     int  `getopt:"--max-direct-leaves      Maximum leaves per node (IPFS default: 174)"`          // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
-	MaxSiblingSubgroups int  `getopt:"--max-sibling-subgroups  Maximum same-depth-groups per node (IPFS default: 4)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/trickle/trickledag.go#L34
+	UnixfsNulLeafCompat bool `getopt:"--unixfs-nul-leaf-compat     Flag to force convergence with go-ipfs *specifically* when encoding a 0-length stream (override encoder leaf-type)"`
+	MaxDirectLeaves     int  `getopt:"--max-direct-leaves=[1:]     Maximum leaves per node (IPFS default: 174)"`          // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
+	MaxSiblingSubgroups int  `getopt:"--max-sibling-subgroups=[1:] Maximum same-depth-groups per node (IPFS default: 4)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/trickle/trickledag.go#L34
 	descentPrealloc     int
 }
 type state struct {

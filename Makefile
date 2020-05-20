@@ -1,6 +1,7 @@
 .PHONY: $(MAKECMDGOALS)
 
-DAGLD_STRIP=-s -w -buildid=
+DAGGO=go
+DAGLD_STRIP=-gcflags -trimpath="$(shell pwd)" -ldflags=all="-s -w -buildid="
 DAGGC_NOBOUNDCHECKS=-B -C
 
 DAGMOD=github.com/ipfs-shipyard/DAGger
@@ -10,68 +11,74 @@ DAGTAG_NOSANCHECKS=nosanchecks_DAGger nosanchecks_qringbuf
 
 ### !!! Needs to be set when using padfinder_rure
 ###     See https://github.com/BurntSushi/rure-go#install
-export CGO_LDFLAGS=-L$(HOME)/devel/regex/target/release
-DAGTAG_PADFINDER_TYPE=padfinder_rure
+# export CGO_LDFLAGS=-L$(HOME)/devel/regex/target/release
+# DAGTAG_PADFINDER_TYPE=padfinder_rure
 
-build:
+build-all: build
 	mkdir -p tmp/pprof
-	mkdir -p bin/
 
-	go build \
-		-tags "$(DAGTAG_PADFINDER_TYPE)" \
-		--trimpath "-ldflags=all=$(DAGLD_STRIP)" \
-		-o bin/ ./cmd/...
-
-	go build \
+	$(DAGGO) build \
 		-tags "$(DAGTAG_PADFINDER_TYPE) $(DAGTAG_NOSANCHECKS)" \
 		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
-		--trimpath "-ldflags=all=$(DAGLD_STRIP)" \
+		$(DAGLD_STRIP) \
 		-o bin/stream-dagger-nochecks ./cmd/stream-dagger
 
-	go build \
+	$(DAGGO) build \
 		-tags "profile $(DAGTAG_PADFINDER_TYPE)" "-ldflags=-X $(DAGMOD)/internal/dagger/util.profileOutDir=$(shell pwd)/tmp/pprof" \
 		"-gcflags=all=-l" \
 		-o bin/stream-dagger-writepprof ./cmd/stream-dagger
 
-	go build \
+	$(DAGGO) build \
 		-tags "profile $(DAGTAG_PADFINDER_TYPE) $(DAGTAG_NOSANCHECKS)" "-ldflags=-X $(DAGMOD)/internal/dagger/util.profileOutDir=$(shell pwd)/tmp/pprof" \
 		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
 		"-gcflags=all=-l" \
 		-o bin/stream-dagger-writepprof-nochecks ./cmd/stream-dagger
 
+build:
+	mkdir -p bin/
+
+	$(DAGGO) build \
+		-tags "$(DAGTAG_PADFINDER_TYPE)" \
+		$(DAGLD_STRIP) \
+		-o bin/stream-dagger ./cmd/stream-dagger
+
+
+test: build-maint
+	# anything above 32 and we blow through > 256 open file handles
+	$(DAGGO) test -tags "$(DAGTAG_PADFINDER_TYPE)" -timeout=0 -parallel=32 -count=1 -failfast ./...
+
+build-maint:
+	mkdir -p tmp/maintbin
+	# build the maint tools without boundchecks to speed things up
+	$(DAGGO) build \
+		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
+		"-ldflags=all=$(DAGLD_RELEASE)" \
+		-o tmp/maintbin/dezstd ./maint/src/dezstd
+
+
 analyze-all:
-	go build \
+	$(DAGGO) build \
 		-tags "$(DAGTAG_PADFINDER_TYPE)" \
 		$(addsuffix /...="-m -m",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
 analyze-all-nochecks:
-	go build \
+	$(DAGGO) build \
 		-tags "$(DAGTAG_PADFINDER_TYPE) $(DAGTAG_NOSANCHECKS)" \
 		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
 		$(addsuffix /...="-m -m",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
 analyze-bound-checks:
-	go build \
+	$(DAGGO) build \
 		-tags "$(DAGTAG_PADFINDER_TYPE)" \
-		$(addsuffix /...="--d=ssa/check_bce/debug=1",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
+		$(addsuffix /...="-d=ssa/check_bce/debug=1",$(addprefix -gcflags=,$(DAGMOD) $(DAGMOD_EXTRA))) \
 		-o /dev/null ./cmd/stream-dagger 2>&1 | ( [ -t 1 ] && less -SRI || cat )
 
+
 serve-latest-pprof-cpu:
-	go tool pprof -http=:9090 tmp/pprof/latest_cpu.prof
+	$(DAGGO) tool pprof -http=:9090 tmp/pprof/latest_cpu.prof
 
 serve-latest-pprof-allocs:
-	go tool pprof -http=:9090 -alloc_objects tmp/pprof/latest_allocs.prof
+	$(DAGGO) tool pprof -http=:9090 -alloc_objects tmp/pprof/latest_allocs.prof
 
-test: build-maint
-	# anything above 32 and we blow through > 256 open file handles
-	go test -tags "$(DAGTAG_PADFINDER_TYPE)" -timeout=0 -parallel=32 -count=1 -failfast ./...
-
-build-maint:
-	mkdir -p tmp/maintbin
-	# build the maint tools without boundchecks to speed things up
-	go build --trimpath \
-		"-gcflags=all=$(DAGGC_NOBOUNDCHECKS)" \
-		"-ldflags=all=$(DAGLD_RELEASE)" \
-		-o tmp/maintbin/ ./maint/...

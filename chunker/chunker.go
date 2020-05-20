@@ -20,7 +20,7 @@ type ChunkMeta map[string]interface{}
 
 func (cm ChunkMeta) Bool(name string) bool {
 	if slot, exists := cm[name]; exists {
-		if val, typeAsserted := slot.(bool); typeAsserted {
+		if val, isBool := slot.(bool); isBool {
 			return val
 		}
 	}

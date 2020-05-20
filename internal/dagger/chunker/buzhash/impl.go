@@ -7,16 +7,17 @@ import (
 )
 
 type config struct {
-	TargetValue uint32 `getopt:"--state-target    State value denoting a chunk boundary (IPFS default: 0)"`
-	MaskBits    int    `getopt:"--state-mask-bits Amount of bits of state to compare to target on every iteration. For random input average chunk size is about 2**m (IPFS default: 17)"`
-	MaxSize     int    `getopt:"--max-size        Maximum data chunk size (IPFS default: 524288)"`
-	MinSize     int    `getopt:"--min-size        Minimum data chunk size (IPFS default: 131072)"`
+	TargetValue uint32 `getopt:"--state-target=uint32     State value denoting a chunk boundary (IPFS default: 0)"`
+	MaskBits    int    `getopt:"--state-mask-bits=[5:22]  Amount of bits of state to compare to target on every iteration. For random input average chunk size is about 2**m (IPFS default: 17)"`
+	MaxSize     int    `getopt:"--max-size=[1:MaxPayload] Maximum data chunk size (IPFS default: 524288)"`
+	MinSize     int    `getopt:"--min-size=[0:MaxPayload] Minimum data chunk size (IPFS default: 131072)"`
 	xvName      string // getopt attached dynamically during init
 }
 
 type buzhashChunker struct {
 	// derived from the tables at the end of the file, selectable via --hash-table
 	mask           uint32
+	target         uint32
 	minSansPreheat int
 	xv             xorVector
 	config
@@ -65,7 +66,7 @@ func (c *buzhashChunker) Split(
 		}
 
 		// cycle
-		for curIdx < nextRoundMax && ((state & c.mask) != c.TargetValue) {
+		for curIdx < nextRoundMax && ((state & c.mask) != c.target) {
 			// it seems we are skipping one rotation compared to what asuran does
 			// https://gitlab.com/asuran-rs/asuran/-/blob/06206d116259821aded5ab1ee2897655b1724c69/asuran-chunker/src/buzhash.rs#L93
 			state = bits.RotateLeft32(state, 1) ^ c.xv[buf[curIdx]] ^ c.xv[buf[curIdx-32]]

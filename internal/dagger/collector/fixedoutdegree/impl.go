@@ -7,7 +7,7 @@ import (
 )
 
 type config struct {
-	MaxOutdegree int `getopt:"--max-outdegree   Maximum outdegree (children) for a node (IPFS default: 174)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
+	MaxOutdegree int `getopt:"--max-outdegree=[2:]  Maximum outdegree (children) for a node (IPFS default: 174)"` // https://github.com/ipfs/go-unixfs/blob/v0.2.4/importer/helpers/helpers.go#L26
 }
 type state struct {
 	stack [][]*dgrblock.Header

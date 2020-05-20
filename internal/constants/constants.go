@@ -10,7 +10,7 @@ const (
 	MaxLeafPayloadSize = 1024 * 1024
 	MaxBlockWireSize   = (2 * 1024 * 1024) - 1
 
-	minGoVersion = __SOFTWARE_REQUIRES_GO_VERSION_1_13__
+	minGoVersion = __SOFTWARE_REQUIRES_GO_VERSION_1_11__
 )
 
 var LongTests bool

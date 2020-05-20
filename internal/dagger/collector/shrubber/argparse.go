@@ -34,25 +34,9 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 	}
 
 	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		initErrs = []string{err.Error()}
+	if initErrs = util.ArgParse(args, optSet); len(initErrs) > 0 {
 		return
 	}
-
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
-	}
-
-	// if co.MaxOutdegree < 2 {
-	// 	initErrs = append(initErrs, fmt.Sprintf(
-	// 		"value of 'max-outdegree' %d is out of range [2:...]",
-	// 		co.MaxOutdegree,
-	// 	))
-	// }
 
 	if co.NextCollector == nil {
 		initErrs = append(
@@ -61,8 +45,8 @@ func NewCollector(args []string, dgrCfg *dgrcollector.DaggerConfig) (_ dgrcollec
 		)
 	}
 
-	co.cidMask = (1 << co.CidMaskBits) - 1
-	co.PadLayerNodes = 3
+	co.cidMask = (1 << uint(co.SubgroupCidMaskBits)) - 1
+	co.cidTailTarget = uint16(co.SubgroupCidTarget)
 
 	return co, initErrs
 }

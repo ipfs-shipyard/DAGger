@@ -22,7 +22,7 @@ func main() {
 	// On error it will log.Fatal() on its own
 	dgr := dagger.NewFromArgv(os.Args)
 
-	if 0 != (inStat.Mode() & os.ModeCharDevice) {
+	if util.IsTTY(os.Stdin) {
 		fmt.Fprint(
 			os.Stderr,
 			"------\nYou seem to be feeding data straight from a terminal, an odd choice...\nNevertheless will proceed to read until EOF ( Ctrl+D )\n------\n",

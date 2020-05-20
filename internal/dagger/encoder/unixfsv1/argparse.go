@@ -34,17 +34,8 @@ func NewEncoder(args []string, dgrCfg *dgrencoder.DaggerConfig) (_ dgrencoder.No
 	}
 
 	// bail early if getopt fails
-	if err := optSet.Getopt(args, nil); err != nil {
-		initErrs = []string{err.Error()}
+	if initErrs = util.ArgParse(args, optSet); len(initErrs) > 0 {
 		return
-	}
-
-	args = optSet.Args()
-	if len(args) != 0 {
-		initErrs = append(initErrs, fmt.Sprintf(
-			"unexpected parameter(s): %s...",
-			args[0],
-		))
 	}
 
 	if !optSet.IsSet("unixfs-leaf-decorator-type") {
